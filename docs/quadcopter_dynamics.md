@@ -110,3 +110,20 @@ If any motor command exceeds $[\text{PWM}_{\text{idle}}, \text{PWM}_{\text{max}}
 
 ### 5.4 Optimal LQR Synthesis & Stability Margins
 For linearized hover state $\mathbf{x} = [\phi, p, u_m]^T$ (including $20\text{ ms}$ motor lag $\tau_m$), optimal state feedback $u = -K_{\text{LQR}} \mathbf{x} + \bar{N} \phi_{\text{ref}}$ is synthesized via `lqr_and_bode_analysis.m`, alongside frequency-domain open-loop Bode margin verification ($74.9^\circ$ Phase Margin, $\infty\text{ dB}$ Gain Margin).
+
+---
+
+## 6. Embedded AI & Machine Learning Subsystems
+
+### 6.1 Safe Residual TinyMLP + Online Lyapunov Adaptation
+A compact `6 -> 12 (tanh) -> 8 (tanh) -> 3 (linear)` neural network (`tiny_nn.c` / `ai_neuro_compensator.m`) runs at $1\text{ kHz}$ alongside the baseline PID:
+$$\mathbf{u}_{\text{total}} = \mathbf{u}_{\text{PID}} + \text{clamp}\big(\mathbf{W}_{\text{live}} \boldsymbol{\phi}(\mathbf{x}_{\text{norm}}) + \mathbf{b}_3,\ -\mathbf{u}_{\max},\ +\mathbf{u}_{\max}\big)$$
+During flight, the output layer adapts online via **$\sigma$-modification MIT-rule gradient descent**:
+$$\dot{\mathbf{W}}_{\text{live}} = \eta \, \mathbf{e}_{\text{rate}} \, \boldsymbol{\phi}^T - \sigma \, (\mathbf{W}_{\text{live}} - \mathbf{W}_{3,\text{base}})$$
+which cancels persistent crosswinds and asymmetric motor/CG imbalances while bounding adaptive weights strictly inside `[W3_base - max_dw, W3_base + max_dw]`.
+
+### 6.2 Real-Time 4-Class TinyML Fault & Anomaly Classifier
+Over a $32\text{ ms}$ sliding window, `ai_fault_detector.c` extracts 5 physical invariants (`gyro_jitter_rms`, `accel_dev`, `motor_asym`, `rate_err_rms`, `peak_g`) and evaluates a `5 -> 10 (tanh) -> 4 (Softmax)` classifier (`100 Hz`) distinguishing `NORMAL`, `PROP_VIBRATION`, `MOTOR_LOSS`, and `COLLISION`.
+
+### 6.3 Deep Deterministic Policy Gradient (DDPG) Reinforcement Learning
+`ai_rl_agent_train.m` trains a continuous Actor-Critic `rlDDPGAgent` directly inside a custom nonlinear quadcopter environment (`rlFunctionEnv`) with wind gusts and compares disturbance rejection against pure PID and Neuro-Adaptive PID.

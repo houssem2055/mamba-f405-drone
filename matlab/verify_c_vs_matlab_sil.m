@@ -24,7 +24,7 @@ hover_thr   = (pwm_hover - drone.pwm_idle) / (drone.pwm_max - drone.pwm_idle);
 q = [1; 0; 0; 0];
 omega = [0; 0; 0];
 rw = ones(4, 1) * drone.omega_idle;
-clear flight_controller attitude_estimator biquad_filter;
+clear flight_controller attitude_estimator biquad_filter ai_neuro_compensator;
 
 m_roll = zeros(5000, 1);
 m_motors = zeros(5000, 4);
@@ -43,7 +43,7 @@ for k = 1:5000
     accel = [r31; r32; r33] * drone.g;
     gyro  = omega + [vib; -0.8*vib; 0.3*vib];
 
-    [mpwm, ~] = flight_controller([thr; rc_roll; 0; 0], accel, gyro, uint8(1), uint8(1), dt, 16.0, uint8(1));
+    [mpwm, ~] = flight_controller([thr; rc_roll; 0; 0], accel, gyro, uint8(1), uint8(1), dt, 16.0, uint8(1), uint8(1));
     m_motors(k, :) = mpwm';
 
     w_cmd = drone.omega_idle + ((mpwm - 1000.0) / 1000.0) * 2000.0;

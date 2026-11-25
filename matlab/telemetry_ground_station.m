@@ -89,6 +89,15 @@ try
                     data = vals';
                     got_data = true;
                 end
+            elseif startsWith(line_str, "$AI,")
+                ai_vals = sscanf(line_str, "$AI,%f,%d,%f,%f,%f,%f,%d");
+                if length(ai_vals) >= 7
+                    fault_names = {'NORMAL', 'PROP_VIB', 'MOTOR_LOSS', 'COLLISION'};
+                    f_idx = min(max(ai_vals(2) + 1, 1), 4);
+                    sgtitle(fig, sprintf('AI Health: %.1f%% | Class: %s | NN Comp: (%.3f, %.3f) | AI=%d', ...
+                        ai_vals(1)*100, fault_names{f_idx}, ai_vals(3), ai_vals(4), ai_vals(7)), ...
+                        'FontWeight', 'bold');
+                end
             elseif strlength(line_str) > 0
                 fprintf('[FC MSG]: %s\n', line_str);
             end

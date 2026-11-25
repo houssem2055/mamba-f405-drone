@@ -1,17 +1,21 @@
 #include "flight_controller.h"
 #include "attitude_mahony.h"
 #include "biquad.h"
+#include "tiny_nn.h"
+#include "ai_weights.h"
 #include "config.h"
 #include <math.h>
 #include <string.h>
 
 #define PI_F 3.14159265358979323846f
 
-/* Persistent AHRS & Filter Instances */
+/* Persistent AHRS, Filters & TinyML Neuro-Compensator */
 static Mahony_AHRS_t   s_ahrs;
 static Biquad_Filter_t s_gyro_lpf[3];
 static Biquad_Filter_t s_gyro_notch[3];
 static Biquad_Filter_t s_dterm_lpf[3];
+static TinyNN_Model_t  s_neuro_comp;
+static bool            s_ai_enabled = true;
 
 /* Persistent PID Controller States */
 static float s_i_roll  = 0.0f;
@@ -53,6 +57,17 @@ void Flight_Controller_Init(void) {
         Biquad_Init(&s_dterm_lpf[i],  BIQUAD_LPF,   DTERM_LPF_CUTOFF_HZ,  LOOP_FREQUENCY_HZ, BUTTERWORTH_Q);
     }
 
+    TinyNN_Init(
+        &s_neuro_comp,
+        AI_COMP_IN_DIM, AI_COMP_H1_DIM, AI_COMP_H2_DIM, AI_COMP_OUT_DIM,
+        AI_COMP_IN_MEAN, AI_COMP_IN_INV_STD,
+        AI_COMP_W1, AI_COMP_B1,
+        AI_COMP_W2, AI_COMP_B2,
+        AI_COMP_W3, AI_COMP_B3,
+        true
+    );
+    s_ai_enabled = true;
+
     s_i_roll = 0.0f;  s_i_pitch = 0.0f; s_i_yaw = 0.0f;
     s_prev_gyro_p = 0.0f; s_prev_gyro_q = 0.0f; s_prev_gyro_r = 0.0f;
     s_prev_sp_p = 0.0f;   s_prev_sp_q = 0.0f;   s_prev_sp_r = 0.0f;
@@ -69,6 +84,19 @@ void Flight_Controller_Get_Gains(PID_Gains_t *out_gains) {
     if (out_gains) {
         *out_gains = s_gains;
     }
+}
+
+void Flight_Controller_Set_AI(bool enable, bool online_adapt) {
+    s_ai_enabled = enable;
+    s_neuro_comp.online_adapt_enabled = online_adapt;
+}
+
+bool Flight_Controller_Get_AI_Enabled(void) {
+    return s_ai_enabled;
+}
+
+void Flight_Controller_Reset_AI(void) {
+    TinyNN_Reset_Live_Weights(&s_neuro_comp);
 }
 
 void Flight_Controller_Reset_Attitude(float ax, float ay, float az) {
@@ -96,7 +124,7 @@ void Flight_Controller_Update(
     float q_meas = Biquad_Apply(&s_gyro_notch[1], gy_lpf);
     float r_meas = Biquad_Apply(&s_gyro_notch[2], gz_lpf);
 
-    /* 2. Singularity-Free Quaternion Mahony AHRS (always active for live bench tilt) */
+    /* 2. Singularity-Free Quaternion Mahony AHRS */
     float est_roll = 0.0f, est_pitch = 0.0f, est_yaw = 0.0f;
     Mahony_Update(&s_ahrs, p_meas, q_meas, r_meas, imu->ax, imu->ay, imu->az, dt, &est_roll, &est_pitch, &est_yaw);
 
@@ -113,6 +141,11 @@ void Flight_Controller_Update(
     attitude_out->gx_filt = p_meas;
     attitude_out->gy_filt = q_meas;
     attitude_out->gz_filt = r_meas;
+    attitude_out->err_p   = 0.0f;
+    attitude_out->err_q   = 0.0f;
+    attitude_out->ai_du[0] = 0.0f;
+    attitude_out->ai_du[1] = 0.0f;
+    attitude_out->ai_du[2] = 0.0f;
 
     float throttle_in = Clamp(rc->throttle, 0.0f, 1.0f);
 
@@ -136,24 +169,31 @@ void Flight_Controller_Update(
     }
 
     /* 4. Outer Loop (Acro / Angle / Horizon) */
-    const float max_angle   = 0.7854f; /* +/- 45 deg */
-    const float max_rate_rp = 4.5f;    /* rad/s */
-    const float max_rate_y  = 3.5f;    /* rad/s */
+    const float max_angle   = 0.7854f;
+    const float max_rate_rp = 4.5f;
+    const float max_rate_y  = 3.5f;
 
+    float err_roll_ang  = 0.0f;
+    float err_pitch_ang = 0.0f;
     float p_des, q_des, r_des;
+
     if (rc->flight_mode == FLIGHT_MODE_ANGLE) {
         float target_roll  = Clamp(rc->roll_cmd,  -max_angle, max_angle);
         float target_pitch = Clamp(rc->pitch_cmd, -max_angle, max_angle);
-        p_des = s_gains.Kp_angle * (target_roll  - est_roll);
-        q_des = s_gains.Kp_angle * (target_pitch - est_pitch);
+        err_roll_ang  = target_roll  - est_roll;
+        err_pitch_ang = target_pitch - est_pitch;
+        p_des = s_gains.Kp_angle * err_roll_ang;
+        q_des = s_gains.Kp_angle * err_pitch_ang;
         r_des = rc->yaw_cmd;
     } else if (rc->flight_mode == FLIGHT_MODE_HORIZON) {
         float abs_r = fabsf(rc->roll_cmd);
         float abs_p = fabsf(rc->pitch_cmd);
         float blend = Clamp(((abs_r > abs_p) ? abs_r : abs_p) / max_angle, 0.0f, 1.0f);
 
-        float p_angle = s_gains.Kp_angle * (Clamp(rc->roll_cmd,  -max_angle, max_angle) - est_roll);
-        float q_angle = s_gains.Kp_angle * (Clamp(rc->pitch_cmd, -max_angle, max_angle) - est_pitch);
+        err_roll_ang  = Clamp(rc->roll_cmd,  -max_angle, max_angle) - est_roll;
+        err_pitch_ang = Clamp(rc->pitch_cmd, -max_angle, max_angle) - est_pitch;
+        float p_angle = s_gains.Kp_angle * err_roll_ang;
+        float q_angle = s_gains.Kp_angle * err_pitch_ang;
         float p_acro  = (rc->roll_cmd  / max_angle) * max_rate_rp;
         float q_acro  = (rc->pitch_cmd / max_angle) * max_rate_rp;
 
@@ -161,7 +201,6 @@ void Flight_Controller_Update(
         q_des = (1.0f - blend) * q_angle + blend * q_acro;
         r_des = rc->yaw_cmd;
     } else {
-        /* FLIGHT_MODE_ACRO */
         p_des = rc->roll_cmd;
         q_des = rc->pitch_cmd;
         r_des = rc->yaw_cmd;
@@ -171,10 +210,12 @@ void Flight_Controller_Update(
     q_des = Clamp(q_des, -max_rate_rp, max_rate_rp);
     r_des = Clamp(r_des, -max_rate_y,  max_rate_y);
 
-    /* 5. Inner Loop: Angular Rate PID (Derivative-on-Measurement + D-LPF + Feedforward) */
+    /* 5. Inner Loop: Angular Rate PID */
     float err_p = p_des - p_meas;
     float err_q = q_des - q_meas;
     float err_r = r_des - r_meas;
+    attitude_out->err_p = err_p;
+    attitude_out->err_q = err_q;
 
     const float pwm_scale  = 800.0f;
     const float max_i_term = 120.0f / pwm_scale;
@@ -197,7 +238,6 @@ void Flight_Controller_Update(
     float d_q = Biquad_Apply(&s_dterm_lpf[1], d_q_raw);
     float d_r = Biquad_Apply(&s_dterm_lpf[2], d_r_raw);
 
-    /* Filtered Setpoint Feedforward */
     const float sp_alpha = 0.05f;
     s_sp_dot_p += sp_alpha * ((p_des - s_prev_sp_p) / dt - s_sp_dot_p);
     s_sp_dot_q += sp_alpha * ((q_des - s_prev_sp_q) / dt - s_sp_dot_q);
@@ -210,6 +250,26 @@ void Flight_Controller_Update(
     float ff_p = s_gains.Kf_p * s_sp_dot_p;
     float ff_q = s_gains.Kf_q * s_sp_dot_q;
     float ff_r = s_gains.Kf_r * s_sp_dot_r;
+
+    /* 5.5 Embedded TinyMLP Neural Compensator + Online Adaptation */
+    float du_ai[3] = {0.0f, 0.0f, 0.0f};
+    if (s_ai_enabled) {
+        float nn_in[6] = {err_roll_ang, err_pitch_ang, err_p, err_q, p_meas, q_meas};
+        float nn_out[3] = {0.0f, 0.0f, 0.0f};
+        TinyNN_Forward(&s_neuro_comp, nn_in, nn_out);
+
+        du_ai[0] = Clamp(nn_out[0], -0.18f, 0.18f);
+        du_ai[1] = Clamp(nn_out[1], -0.18f, 0.18f);
+        du_ai[2] = Clamp(nn_out[2], -0.12f, 0.12f);
+
+        if (throttle_in >= MIN_THROTTLE_FOR_ARM || airmode) {
+            float rate_err[3] = {err_p, err_q, err_r};
+            TinyNN_Adapt_Output(&s_neuro_comp, rate_err, 0.15f, 0.08f, 0.35f, dt);
+        }
+    }
+    attitude_out->ai_du[0] = du_ai[0];
+    attitude_out->ai_du[1] = du_ai[1];
+    attitude_out->ai_du[2] = du_ai[2];
 
     /* 6. TPA & Battery Voltage Sag Compensation */
     float tpa_scale = 1.0f;
@@ -224,9 +284,9 @@ void Flight_Controller_Update(
 
     float pid_scale = pwm_scale * tpa_scale * vbat_scale;
 
-    float u_roll  = (s_gains.Kp_p * err_p + d_p + ff_p) * pid_scale + (s_i_roll  * pwm_scale * vbat_scale);
-    float u_pitch = (s_gains.Kp_q * err_q + d_q + ff_q) * pid_scale + (s_i_pitch * pwm_scale * vbat_scale);
-    float u_yaw   = (s_gains.Kp_r * err_r + d_r + ff_r) * pid_scale + (s_i_yaw   * pwm_scale * vbat_scale);
+    float u_roll  = (s_gains.Kp_p * err_p + d_p + ff_p + du_ai[0]) * pid_scale + (s_i_roll  * pwm_scale * vbat_scale);
+    float u_pitch = (s_gains.Kp_q * err_q + d_q + ff_q + du_ai[1]) * pid_scale + (s_i_pitch * pwm_scale * vbat_scale);
+    float u_yaw   = (s_gains.Kp_r * err_r + d_r + ff_r + du_ai[2]) * pid_scale + (s_i_yaw   * pwm_scale * vbat_scale);
 
     /* 7. Quad-X Motor Mixing with Airmode Desaturation */
     float base_thrust = MOTOR_IDLE_PWM_US + throttle_in * (MOTOR_MAX_PWM_US - MOTOR_IDLE_PWM_US);

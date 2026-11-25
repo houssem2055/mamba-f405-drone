@@ -20,6 +20,7 @@
 #include "flight_controller.h"
 #include "telemetry.h"
 #include "blackbox.h"
+#include "ai_fault_detector.h"
 #include <math.h>
 
 /* Hardware Platform Hooks (implemented in bsp/stm32f405_hal_bsp.c or SIL host) */
@@ -33,11 +34,12 @@ static volatile uint32_t s_system_ticks_ms = 0;
 static volatile bool     s_loop_trigger_1khz = false;
 
 /* Flight State Structures */
-static MPU6000_Data_t  s_imu;
-static RC_Channels_t   s_rc;
-static Motor_Outputs_t s_motors;
-static Attitude_t      s_attitude;
-static bool            s_is_armed = false;
+static MPU6000_Data_t   s_imu;
+static RC_Channels_t    s_rc;
+static Motor_Outputs_t  s_motors;
+static Attitude_t       s_attitude;
+static AI_Diagnostics_t s_ai_diag;
+static bool             s_is_armed = false;
 
 /* SysTick interrupt handler (1 ms period = 1000 Hz) */
 void SysTick_Handler(void) {
@@ -56,6 +58,7 @@ static void System_Init(void) {
     Telemetry_Init();
     Blackbox_Init();
     Flight_Controller_Init();
+    AI_Fault_Detector_Init();
 }
 
 static bool Check_Arming_Conditions(const RC_Channels_t *rc, const Attitude_t *att) {
@@ -83,6 +86,7 @@ int main(void) {
     }
 
     uint32_t telemetry_counter = 0;
+    uint32_t ai_tlm_counter    = 0;
     uint32_t blackbox_counter  = 0;
     uint32_t led_counter       = 0;
     bool     led_state         = false;
@@ -140,6 +144,17 @@ int main(void) {
             Motors_Disarm();
         }
 
+        /* 6.5 Real-Time TinyML Anomaly & Fault Classifier (100 Hz inference inside 1 kHz buffer) */
+        AI_Fault_Detector_Update(
+            s_imu.gx, s_imu.gy,
+            s_attitude.gx_filt, s_attitude.gy_filt,
+            s_imu.ax, s_imu.ay, s_imu.az,
+            s_attitude.err_p, s_attitude.err_q,
+            &s_motors,
+            s_is_armed,
+            &s_ai_diag
+        );
+
         /* 7. Blackbox Recording at 250 Hz (every 4 ms while armed) */
         blackbox_counter++;
         if (blackbox_counter >= 4U) {
@@ -149,14 +164,20 @@ int main(void) {
             }
         }
 
-        /* 8. Bidirectional Telemetry Stream to MATLAB at 50 Hz (every 20 ms) */
+        /* 8. Bidirectional Telemetry Stream to MATLAB at 50 Hz + AI Frame at 10 Hz */
         telemetry_counter++;
         if (telemetry_counter >= 20U) {
             telemetry_counter = 0U;
             Telemetry_Send_Frame(&s_attitude, &s_motors, vbat, s_is_armed, s_rc.flight_mode);
         }
 
-        /* 9. Status LED & Beeper Feedback */
+        ai_tlm_counter++;
+        if (ai_tlm_counter >= 100U) {
+            ai_tlm_counter = 0U;
+            Telemetry_Send_AI_Frame(&s_attitude, &s_ai_diag);
+        }
+
+        /* 9. Status LED & Beeper Feedback (alerts on low Vbat or AI Fault) */
         led_counter++;
         if (s_is_armed) {
             Status_LED_Set(true); /* Solid ON when armed */
@@ -174,7 +195,8 @@ int main(void) {
             }
         }
 
-        Buzzer_Set(s_rc.beeper || (s_is_armed && vbat > 6.0f && vbat < 13.6f));
+        bool ai_fault_alarm = (s_is_armed && s_ai_diag.fault_class != AI_FAULT_NORMAL && s_ai_diag.health_score < 0.35f);
+        Buzzer_Set(s_rc.beeper || ai_fault_alarm || (s_is_armed && vbat > 6.0f && vbat < 13.6f));
     }
 
     return 0;

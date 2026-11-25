@@ -88,7 +88,7 @@ armed   = uint8(1);
 airmode = uint8(1);
 
 % Reset controller persistent state cleanly before run
-clear flight_controller attitude_estimator biquad_filter;
+clear flight_controller attitude_estimator biquad_filter ai_neuro_compensator;
 rng(42); % Reproducible noise seed
 
 for k = 1:N

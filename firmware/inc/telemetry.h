@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "flight_controller.h"
+#include "ai_fault_detector.h"
 #include "motors.h"
 
 void Telemetry_Init(void);
@@ -14,6 +15,7 @@ void Telemetry_Send_Frame(
     bool armed,
     uint8_t mode
 );
+void Telemetry_Send_AI_Frame(const Attitude_t *att, const AI_Diagnostics_t *ai);
 void Telemetry_Send_PID_Gains(void);
 void Telemetry_Process_Rx_Byte(uint8_t byte);
 

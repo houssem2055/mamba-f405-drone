@@ -18,6 +18,7 @@ except ImportError:
     sys.exit(1)
 
 MODES = {0: "ACRO", 1: "ANGLE", 2: "HORIZON"}
+AI_FAULTS = {0: "NORMAL", 1: "PROP_VIB", 2: "MOTOR_LOSS", 3: "COLLISION"}
 
 
 def list_ports():
@@ -77,6 +78,11 @@ def main():
                             end="",
                             flush=True,
                         )
+                elif line.startswith("$AI,"):
+                    p = line.split(",")
+                    if len(p) >= 8:
+                        cls_name = AI_FAULTS.get(int(p[2]), p[2])
+                        print(f"\n[AI]: Health={p[1]} | Fault={cls_name} | NN_du=({p[3]},{p[4]}) | Jitter={p[5]} | Asym={p[6]}")
                 elif line:
                     print(f"\n[FC]: {line}")
 

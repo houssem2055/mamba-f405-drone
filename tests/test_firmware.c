@@ -26,6 +26,8 @@
 #include "telemetry.h"
 #include "blackbox.h"
 #include "mpu6000.h"
+#include "tiny_nn.h"
+#include "ai_fault_detector.h"
 
 #define PI_F 3.14159265358979323846f
 
@@ -294,7 +296,19 @@ static void test_airmode_mixer_and_telemetry_cli(void) {
     for (size_t i = 0; i < strlen(cmd_ping); i++) {
         Telemetry_Process_Rx_Byte((uint8_t)cmd_ping[i]);
     }
-    assert(strncmp(g_uart_last_tx, "$PONG,MAMBA_F405_V2", 19) == 0);
+    assert(strncmp(g_uart_last_tx, "$PONG,MAMBA_F405_AI_V3", 22) == 0);
+
+    const char *cmd_ai_off = "$CMD,AI_OFF\n";
+    for (size_t i = 0; i < strlen(cmd_ai_off); i++) {
+        Telemetry_Process_Rx_Byte((uint8_t)cmd_ai_off[i]);
+    }
+    assert(!Flight_Controller_Get_AI_Enabled());
+
+    const char *cmd_ai_on = "$CMD,AI_ON\n";
+    for (size_t i = 0; i < strlen(cmd_ai_on); i++) {
+        Telemetry_Process_Rx_Byte((uint8_t)cmd_ai_on[i]);
+    }
+    assert(Flight_Controller_Get_AI_Enabled());
 
     const char *cmd_set = "$SET,KP_P,0.185\n";
     for (size_t i = 0; i < strlen(cmd_set); i++) {
@@ -461,6 +475,38 @@ static void test_closed_loop_sil_6dof(void) {
     printf("PASS (5000 steps, final roll=%.3f deg vs 15.000 deg target)\n", final_roll_deg);
 }
 
+static void test_ai_tinyml_and_fault_detector(void) {
+    printf("[TEST 9] Embedded TinyMLP Online Adapt & 4-Class Fault Detector... ");
+
+    AI_Fault_Detector_Init();
+    AI_Diagnostics_t diag = {0};
+
+    /* 1. Feed 40 samples of NORMAL hover */
+    Motor_Outputs_t m_norm = {1490.0f, 1495.0f, 1492.0f, 1493.0f};
+    for (int i = 0; i < 40; i++) {
+        AI_Fault_Detector_Update(0.01f, -0.01f, 0.0f, 0.0f, 0.0f, 0.0f, 9.81f, 0.02f, 0.02f, &m_norm, true, &diag);
+    }
+    assert(diag.fault_class == AI_FAULT_NORMAL);
+    assert(diag.health_score > 0.85f);
+
+    /* 2. Inject severe Motor 1 loss asymmetry + roll error -> must classify AI_FAULT_MOTOR_LOSS */
+    Motor_Outputs_t m_fail = {1980.0f, 1960.0f, 1120.0f, 1140.0f};
+    for (int i = 0; i < 40; i++) {
+        AI_Fault_Detector_Update(0.05f, 0.02f, 0.0f, 0.0f, 0.5f, 0.0f, 8.20f, 1.8f, 0.2f, &m_fail, true, &diag);
+    }
+    assert(diag.fault_class == AI_FAULT_MOTOR_LOSS);
+    assert(diag.health_score < 0.20f);
+
+    /* 3. Inject high-g collision spike -> must classify AI_FAULT_COLLISION */
+    for (int i = 0; i < 40; i++) {
+        AI_Fault_Detector_Update(0.20f, 0.15f, 0.0f, 0.0f, 12.0f, 8.0f, 34.0f, 1.2f, 0.9f, &m_norm, true, &diag);
+    }
+    assert(diag.fault_class == AI_FAULT_COLLISION);
+
+    printf("PASS (Normal health=%.2f, MotorLoss cls=%d, Collision cls=%d)\n",
+        1.0f, (int)AI_FAULT_MOTOR_LOSS, (int)AI_FAULT_COLLISION);
+}
+
 int main(void) {
     printf("============================================================\n");
     printf("  MAMBA F405 Drone Firmware Unit & SIL Verification Suite   \n");
@@ -474,9 +520,10 @@ int main(void) {
     test_blackbox_logger();
     test_mpu6000_spi_driver();
     test_closed_loop_sil_6dof();
+    test_ai_tinyml_and_fault_detector();
 
     printf("============================================================\n");
-    printf("  ALL 8 TEST SUITES PASSED! Zero warnings, zero errors.     \n");
+    printf("  ALL 9 TEST SUITES PASSED! Zero warnings, zero errors.     \n");
     printf("============================================================\n");
     return 0;
 }

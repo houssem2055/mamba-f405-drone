@@ -1,18 +1,17 @@
-function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed, flight_mode, dt, vbat, airmode)
+function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed, flight_mode, dt, vbat, airmode, ai_enabled)
 %#codegen
-% FLIGHT_CONTROLLER (Pro Aerospace Architecture)
+% FLIGHT_CONTROLLER (Pro Aerospace + Embedded TinyML AI Architecture)
 % Deterministic 1 kHz flight control loop featuring:
 %   1. 2nd-Order Butterworth Gyro LPF (90 Hz) + 2nd-Order Notch (220 Hz)
 %   2. Singularity-Free Quaternion Mahony AHRS (always active for bench/tilt checks)
 %   3. Acro (0), Angle (1), and Horizon (2) Flight Modes + RC Expo
 %   4. Cascaded P-PID with Derivative-on-Measurement + 70 Hz D-Term LPF + Feedforward
-%   5. Throttle PID Attenuation (TPA) & Battery Voltage Sag Compensation
-%   6. Airmode Dynamic Mixer Desaturation (preserves control authority at extremes)
+%   5. Embedded TinyMLP Neural Disturbance Compensator + Online Adaptation
+%   6. Throttle PID Attenuation (TPA) & Battery Voltage Sag Compensation
+%   7. Airmode Dynamic Mixer Desaturation (preserves control authority at extremes)
 %
 % Inputs:
 %   rc_cmd:      [throttle (0..1); roll_in; pitch_in; yaw_in]
-%                (In Angle/Horizon mode: roll_in/pitch_in in rad or [-1..1] normalized;
-%                 if |val| <= 1, treated directly as angle rad when called from simulator or scaled)
 %   accel:       [ax; ay; az] in m/s^2
 %   gyro:        [gx; gy; gz] in rad/s
 %   armed:       uint8 (0 = disarmed, 1 = armed)
@@ -20,6 +19,7 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
 %   dt:          Sample time (s), typically 0.001
 %   vbat:        (Optional) Battery voltage in Volts (default 16.0V)
 %   airmode:     (Optional) uint8 (1 = Airmode active, 0 = standard mixer; default 1)
+%   ai_enabled:  (Optional) uint8 (1 = TinyMLP + Online Adaptation ON, 0 = Pure PID; default 1)
 %
 % Outputs:
 %   motors_pwm:  [m1; m2; m3; m4] in microseconds (1000..2000 us)
@@ -30,6 +30,9 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
     end
     if nargin < 8
         airmode = uint8(1);
+    end
+    if nargin < 9
+        ai_enabled = uint8(1);
     end
 
     %% 1. Persistent States
@@ -116,17 +119,23 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
     end
 
     %% 6. Outer Loop (Acro / Angle / Horizon)
+    err_roll_ang  = 0.0;
+    err_pitch_ang = 0.0;
     if flight_mode == 1 % Angle (Self-Leveling) Mode
-        target_roll  = max(min(roll_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD);
-        target_pitch = max(min(pitch_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD);
-        p_des = Kp_angle * (target_roll  - est_roll);
-        q_des = Kp_angle * (target_pitch - est_pitch);
+        target_roll   = max(min(roll_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD);
+        target_pitch  = max(min(pitch_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD);
+        err_roll_ang  = target_roll  - est_roll;
+        err_pitch_ang = target_pitch - est_pitch;
+        p_des = Kp_angle * err_roll_ang;
+        q_des = Kp_angle * err_pitch_ang;
         r_des = yaw_cmd_in;
     elseif flight_mode == 2 % Horizon Mode (blends Angle near center -> Acro at full stick)
         stick_deflection = max(abs(roll_cmd_in), abs(pitch_cmd_in)) / MAX_TILT_RAD;
         blend = max(min(stick_deflection, 1.0), 0.0);
-        p_angle = Kp_angle * (max(min(roll_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD) - est_roll);
-        q_angle = Kp_angle * (max(min(pitch_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD) - est_pitch);
+        err_roll_ang  = max(min(roll_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD) - est_roll;
+        err_pitch_ang = max(min(pitch_cmd_in, MAX_TILT_RAD), -MAX_TILT_RAD) - est_pitch;
+        p_angle = Kp_angle * err_roll_ang;
+        q_angle = Kp_angle * err_pitch_ang;
         p_acro  = (roll_cmd_in  / MAX_TILT_RAD) * MAX_RATE_RP;
         q_acro  = (pitch_cmd_in / MAX_TILT_RAD) * MAX_RATE_RP;
         p_des   = (1.0 - blend) * p_angle + blend * p_acro;
@@ -181,6 +190,14 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
     ff_q = Kf_q * sp_dot_q;
     ff_r = Kf_r * sp_dot_r;
 
+    %% 7.5 Embedded TinyMLP Residual Compensator + Online Adaptation
+    du_ai = [0.0; 0.0; 0.0];
+    if ai_enabled == 1
+        nn_in = [err_roll_ang; err_pitch_ang; err_p; err_q; p_meas; q_meas];
+        adapt_active = (armed == 1) && (throttle_in >= 0.05 || airmode == 1);
+        [du_ai, ~] = ai_neuro_compensator(nn_in, [err_p; err_q; err_r], adapt_active, false, dt);
+    end
+
     %% 8. TPA (Throttle PID Attenuation) & Battery Voltage Sag Compensation
     tpa_scale = 1.0;
     if throttle_in > TPA_BREAKPOINT
@@ -194,9 +211,9 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
 
     pid_scale = PWM_SCALE * tpa_scale * vbat_scale;
 
-    u_roll  = (Kp_p * err_p + d_p + ff_p) * pid_scale + (i_roll  * PWM_SCALE * vbat_scale);
-    u_pitch = (Kp_q * err_q + d_q + ff_q) * pid_scale + (i_pitch * PWM_SCALE * vbat_scale);
-    u_yaw   = (Kp_r * err_r + d_r + ff_r) * pid_scale + (i_yaw   * PWM_SCALE * vbat_scale);
+    u_roll  = (Kp_p * err_p + d_p + ff_p + du_ai(1)) * pid_scale + (i_roll  * PWM_SCALE * vbat_scale);
+    u_pitch = (Kp_q * err_q + d_q + ff_q + du_ai(2)) * pid_scale + (i_pitch * PWM_SCALE * vbat_scale);
+    u_yaw   = (Kp_r * err_r + d_r + ff_r + du_ai(3)) * pid_scale + (i_yaw   * PWM_SCALE * vbat_scale);
 
     %% 9. Quad-X Motor Mixing with Airmode Desaturation
     base_thrust = IDLE_PWM + throttle_in * (MAX_PWM - IDLE_PWM);

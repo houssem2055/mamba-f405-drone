@@ -9,6 +9,8 @@ if(BUILD_HOST_TESTS)
     add_executable(test_firmware
         src/biquad.c
         src/attitude_mahony.c
+        src/tiny_nn.c
+        src/ai_fault_detector.c
         src/flight_controller.c
         src/motors.c
         src/rc_receiver.c

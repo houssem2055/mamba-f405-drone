@@ -38,6 +38,27 @@ void Telemetry_Send_Frame(
     }
 }
 
+void Telemetry_Send_AI_Frame(const Attitude_t *att, const AI_Diagnostics_t *ai) {
+    if (!att || !ai) return;
+
+    char buffer[160];
+    /* Format: $AI,health,fault_cls,du_r,du_p,gyro_jitter,motor_asym,ai_on\r\n */
+    int len = snprintf(buffer, sizeof(buffer),
+        "$AI,%.3f,%u,%.4f,%.4f,%.3f,%.1f,%u\r\n",
+        ai->health_score,
+        (unsigned int)ai->fault_class,
+        att->ai_du[0],
+        att->ai_du[1],
+        ai->feat_gyro_jitter,
+        ai->feat_motor_asym,
+        Flight_Controller_Get_AI_Enabled() ? 1U : 0U
+    );
+
+    if (len > 0) {
+        UART6_SendString(buffer);
+    }
+}
+
 void Telemetry_Send_PID_Gains(void) {
     PID_Gains_t g;
     Flight_Controller_Get_Gains(&g);
@@ -58,15 +79,29 @@ void Telemetry_Send_PID_Gains(void) {
 
 static void Handle_Command_Line(char *line) {
     if (strcmp(line, "$CMD,PING") == 0) {
-        UART6_SendString("$PONG,MAMBA_F405_V2\r\n");
+        UART6_SendString("$PONG,MAMBA_F405_AI_V3\r\n");
         return;
     }
     if (strcmp(line, "$CMD,GET_PID") == 0) {
         Telemetry_Send_PID_Gains();
         return;
     }
+    if (strcmp(line, "$CMD,AI_ON") == 0) {
+        Flight_Controller_Set_AI(true, true);
+        UART6_SendString("$ACK,AI_ON\r\n");
+        return;
+    }
+    if (strcmp(line, "$CMD,AI_OFF") == 0) {
+        Flight_Controller_Set_AI(false, false);
+        UART6_SendString("$ACK,AI_OFF\r\n");
+        return;
+    }
+    if (strcmp(line, "$CMD,AI_RESET") == 0) {
+        Flight_Controller_Reset_AI();
+        UART6_SendString("$ACK,AI_RESET\r\n");
+        return;
+    }
 
-    /* Live PID tuning command format: $SET,<PARAM>,<FLOAT_VAL> */
     if (strncmp(line, "$SET,", 5) == 0) {
         char *param = line + 5;
         char *comma = strchr(param, ',');
@@ -113,6 +148,6 @@ void Telemetry_Process_Rx_Byte(uint8_t byte) {
     if (s_cmd_idx < (uint8_t)(sizeof(s_cmd_buf) - 1U)) {
         s_cmd_buf[s_cmd_idx++] = (char)byte;
     } else {
-        s_cmd_idx = 0; /* Overflow guard */
+        s_cmd_idx = 0;
     }
 }

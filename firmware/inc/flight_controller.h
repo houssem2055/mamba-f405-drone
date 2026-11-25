@@ -24,6 +24,9 @@ typedef struct {
     float gx_filt;   /* Filtered roll rate (rad/s) */
     float gy_filt;   /* Filtered pitch rate (rad/s) */
     float gz_filt;   /* Filtered yaw rate (rad/s) */
+    float err_p;     /* Rate tracking error p (rad/s) */
+    float err_q;     /* Rate tracking error q (rad/s) */
+    float ai_du[3];  /* Residual compensation from TinyMLP [roll, pitch, yaw] */
 } Attitude_t;
 
 typedef struct {
@@ -43,6 +46,9 @@ typedef struct {
 void Flight_Controller_Init(void);
 void Flight_Controller_Set_Gains(const PID_Gains_t *new_gains);
 void Flight_Controller_Get_Gains(PID_Gains_t *out_gains);
+void Flight_Controller_Set_AI(bool enable, bool online_adapt);
+bool Flight_Controller_Get_AI_Enabled(void);
+void Flight_Controller_Reset_AI(void);
 void Flight_Controller_Reset_Attitude(float ax, float ay, float az);
 
 void Flight_Controller_Update(

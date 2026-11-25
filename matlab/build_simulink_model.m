@@ -140,7 +140,7 @@ save_system(model_name, slx_path);
 fprintf('[SUCCESS] Saved Simulink model to %s\n', slx_path);
 
 %% 4. Execute Simulink Simulation to Verify
-clear flight_controller attitude_estimator biquad_filter;
+clear flight_controller attitude_estimator biquad_filter ai_neuro_compensator;
 simOut = sim(model_name, 'ReturnWorkspaceOutputs', 'on');
 ed = squeeze(simOut.sim_euler_deg.Data);
 if size(ed, 1) == 3

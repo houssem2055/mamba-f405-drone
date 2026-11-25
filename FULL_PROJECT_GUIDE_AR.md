@@ -55,21 +55,28 @@ flowchart LR
 | `docs/simulation_results.png` | مخرجات محاكاة الـ 10 ثوانٍ (ضجيج 220Hz، عصفة رياح، شقلبة 360°، هبوط جهد البطارية). |
 | `docs/3d_flight_trajectory.png` | المسار ثلاثي الأبعاد للرحلة. |
 | `docs/bode_lqr_analysis.png` | مخطط Bode لهوامش الاستقرار ومقارنة استجابة PID مقابل LQR. |
+| `docs/ai_training_summary.png` | منحنى تدريب TinyMLP + دقة التعويض + مصفوفة الالتباس لمصنف الأعطال. |
+| `docs/ai_rl_training.png` | منحنى مكافآت وكيل التعلم المعزز DDPG واختبار استجابته مع الريح. |
+| `docs/ai_comparison_results.png` | مقارنة PID التقليدي مع AI Neuro-Adaptive PID تحت عطل محرك 12% ورياح مستمرة. |
 | `matlab/init_drone_parameters.m` | الثوابت الفيزيائية للهيكل، حدود المحركات، المرشحات، ومعاملات الـ PID. |
 | `matlab/biquad_filter.m` | مرشح Biquad من الدرجة الثانية (Butterworth LPF أو Notch) بصيغة Transposed Direct Form II. |
 | `matlab/attitude_estimator.m` | خوارزمية Quaternion Mahony AHRS الخالية من التفرد (Gimbal Lock) مع تعويض انحياز الجيروسكوب. |
-| `matlab/flight_controller.m` | متحكم الطيران الكامل (LPF + Notch + Mahony + Acro/Angle/Horizon + D-on-Measurement + Feedforward + TPA + Vbat + Airmode). |
+| `matlab/ai_weights_data.m` | دالة `#codegen` مولّدة آلياً تحتوي أوزان الشبكة العصبية المطابقة لملف `ai_weights.h`. |
+| `matlab/ai_neuro_compensator.m` | شبكة TinyMLP + التكيف المباشر للأوزان بالوقت الحقيقي (Lyapunov $\sigma$-modification). |
+| `matlab/flight_controller.m` | متحكم الطيران الكامل (LPF + Notch + Mahony + Acro/Angle/Horizon + PID + TinyMLP AI + TPA + Vbat + Airmode). |
 | `matlab/drone_simulation.m` | محاكاة رباعية غير خطية 6-DOF لمدة 10 ثوانٍ (`10,001` خطوة). |
 | `matlab/lqr_and_bode_analysis.m` | خطية النموذج، حساب مصفوفة **LQR**، وحساب هوامش الطور والربح عبر `Control System Toolbox`. |
+| `matlab/ai_train_and_export.m` | تدريب شبكتي TinyMLP ومصنف الأعطال بـ Deep Learning Toolbox وتصدير أوزانهما إلى C و MATLAB. |
+| `matlab/ai_rl_agent_train.m` | تدريب وكيل التعلم المعزز **DDPG** ومقارنة أداء PID و AI تحت الأعطال والرياح. |
 | `matlab/build_simulink_model.m` | بناء وتشغيل نموذج Simulink التنفيذي `mamba_f405_quadcopter.slx`. |
 | `matlab/mamba_f405_quadcopter.slx` | ملف نموذج Simulink الجاهز للفتح والتشغيل والاختبار المرئي. |
 | `matlab/generate_c_code.m` | أتمتة توليد مكتبة C لمعالج ARM Cortex عبر `MATLAB Coder / Embedded Coder`. |
-| `matlab/verify_c_vs_matlab_sil.m` | مقارنة رقمية خطوة بخطوة بين تنفيذ لغة C و MATLAB على 5,000 عينة. |
-| `matlab/telemetry_ground_station.m` | محطة مراقبة أرضية بالوقت الحقيقي في MATLAB (تدعم البورد الحقيقي أو وضع Demo تلقائي). |
+| `matlab/verify_c_vs_matlab_sil.m` | مقارنة رقمية خطوة بخطوة بين تنفيذ لغة C و MATLAB على 5,000 عينة (شاملة TinyML). |
+| `matlab/telemetry_ground_station.m` | محطة مراقبة أرضية بالوقت الحقيقي في MATLAB (تدعم حزم `$TLM` و `$AI` ووضع Demo تلقائي). |
 | `firmware/CMakeLists.txt` | بناء ثنائي الأهداف: فيرموير **STM32F405** مستقل أو اختبارات الحاسوب **Host SIL**. |
-| `firmware/inc/*.h` و `firmware/src/*.c` | الكود المصدري المدمج بلغة C11 (`biquad`, `attitude_mahony`, `flight_controller`, `mpu6000`, `motors`, `rc_receiver`, `telemetry`, `blackbox`, `main`). |
+| `firmware/inc/*.h` و `firmware/src/*.c` | الكود المصدري المدمج بلغة C11 (`biquad`, `attitude_mahony`, `tiny_nn`, `ai_fault_detector`, `flight_controller`, `mpu6000`, `motors`, `rc_receiver`, `telemetry`, `blackbox`, `main`). |
 | `firmware/bsp/*` | دعم العتاد المباشر على السجلات (**Bare-Metal Register-Level BSP**) + Vector Table + Linker Script لـ `STM32F405RGT6`. |
-| `tests/test_firmware.c` | 8 اختبارات وحدة ومحاكاة SIL كاملة بلغة C (`-Wall -Wextra -Werror`). |
+| `tests/test_firmware.c` | 9 اختبارات وحدة و TinyML ومحاكاة SIL كاملة بلغة C (`-Wall -Wextra -Werror`). |
 | `tools/test_serial.py` | مراقب تليميتري في سطر الأوامر بلغة Python يسجل جميع الحزم في `flight_log.csv`. |
 
 ---
@@ -218,18 +225,30 @@ flowchart LR
 
 ---
 
-## 7. حزمة الاختبارات والتحقق التلقائي
+## 7. حزمة الذكاء الاصطناعي والاختبارات والتحقق التلقائي (`TinyML + RL`)
 
-### 7.1 اختبارات لغة C (`tests/test_firmware.c`)
-تُترجم بـ `gcc -std=c11 -Wall -Wextra -Werror -O2` وتغطي **8 اختبارات شاملة**:
+### 7.1 طبقات الذكاء الاصطناعي المدمجة (`tiny_nn.c`, `ai_fault_detector.c`, `ai_train_and_export.m`, `ai_rl_agent_train.m`)
+1. **المعوض العصبي التكيفي (`TinyMLP 6→12→8→3`)**:
+   * دُرب في MATLAB بواسطة Deep Learning Toolbox (`trainlm`) على `8,000` حالة ديناميكية غير خطية وحقق خطأ اختبار **`RMSE = 0.000786`**.
+   * يعمل داخل حلقة `1 kHz` في C (`tiny_nn.c`) بدون أي حجز ديناميكي للذاكرة (`0 malloc`)، ويحدّث طبقة المخرجات لحظياً في الجو بقاعدة MIT مع تسريب أمان ($\sigma$-modification) لإلغاء الرياح المستمرة وعدم توازن المحركات؛ حيث خفض خطأ التتبع في اختبار عطل محرك `12%` + رياح مستمرة من **`2.967°`** إلى **`2.663°`**.
+   * محصور آلياً ضمن حدود آمنة (`±0.18` Roll/Pitch، `±0.12` Yaw) ويمكن تشغيله أو إطفاؤه لحظياً عبر `$CMD,AI_ON` و `$CMD,AI_OFF` و `$CMD,AI_RESET`.
+2. **كاشف الأعطال والصدمات بالزمن الحقيقي (`TinyFaultClassifier 5→10→4 Softmax`)**:
+   * يراقب نافذة منزلقة طولها `32 ms` (اهتزاز الجيروسكوب `gyro_jitter`، انحراف التسارع، عدم تماثل المحركات الأربعة، خطأ التتبع، وذروة الجاذبية `peak_g`) ويصنف الحالة كل `10 ms` (`100 Hz`) بدقة **`100.00%`** إلى: `NORMAL (0)`، `PROP_VIBRATION (1)`، `MOTOR_LOSS (2)`، أو `COLLISION (3)`.
+   * يبث حزمة `$AI,health,fault_cls,du_r,du_p,jitter,asym,ai_on` بمعدل `10 Hz` ويفعّل البازر عند اكتشاف عطل خطير أثناء الطيران.
+3. **وكيل التعلم المعزز (`DDPG Reinforcement Learning`)**:
+   * درّب `ai_rl_agent_train.m` وكيل **Actor-Critic DDPG** (`rlDDPGAgent`) على بيئة تحكم غير خطية لـ `60` حلقة (`Reward = 2.52`) وحقق تتبع خطوة $15^\circ$ مع استقرار تحت عصفة الرياح.
+
+### 7.2 اختبارات لغة C والمقارنة المتقاطعة (`tests/test_firmware.c` و `verify_c_vs_matlab_sil.m`)
+تُترجم بـ `gcc -std=c11 -Wall -Wextra -Werror -O2` وتغطي **9 اختبارات شاملة**:
 1. اختبار مرشحي `LPF` (ربح DC = `1.0`) و `Notch` (تخميد `220 Hz` إلى `0.0001` وتمرير `5 Hz` بنسبة `0.9999`).
 2. اختبار Mahony AHRS وتقاربه مع زوايا الميلان + اختبار **شقلبة 360°** مع بقاء معيار الرباعي `q_norm = 1.000000`.
 3. اختبار تغليف وفك حزم CRSF 11-bit + التحقق من `CRC8` ورفض البتات الفاسدة + اختبار انقطاع الإشارة `Failsafe`.
-4. اختبار تقييد PWM وتكوين حزم **DShot600** مع مجموع التحقق 4-bit.
-5. اختبار **Airmode Desaturation** عند `0%` ثروتل + اختبار تعديل الـ PID الحي عبر أوامر `$CMD,PING` و `$SET,KP_P,...`.
+4. اختبار تقييد PWM وتكوين حزم **DShot600** (`0x82F5`) مع مجموع التحقق 4-bit.
+5. اختبار **Airmode Desaturation** عند `0%` ثروتل + اختبار تعديل الـ PID وأوامر `$CMD,AI_ON`/`$CMD,AI_OFF` حياً.
 6. اختبار مسجل **Blackbox** بحجم إطار `32 bytes`.
 7. اختبار سائق **MPU6000** عبر محاكي سجلات SPI (التهيئة، المعايرة، والقراءة المتصلة Burst Read).
-8. اختبار محاكاة مغلقة الحلقة **5,000 خطوة 6-DOF SIL** في C وتصدير `tests/sil_c_results.csv`.
+8. اختبار محاكاة مغلقة الحلقة **5,000 خطوة 6-DOF SIL** في C وتصدير `tests/sil_c_results.csv` (المطابق لنموذج MATLAB بفارق لا يتجاوز `0.000205°` في الزاوية و `0.008381 µs` في المحرك!).
+9. اختبار شبكة **TinyMLP** وكاشف الأعطال رباعي الفئات في حالات الطيران الطبيعي وعطل المحرك والاصطدام.
 
 ---
 
@@ -246,8 +265,8 @@ flowchart LR
 ```powershell
 cd C:\Users\djall\Desktop\drone
 gcc -std=c11 -Wall -Wextra -Werror -O2 -Ifirmware/inc `
-  firmware/src/biquad.c firmware/src/attitude_mahony.c firmware/src/flight_controller.c `
-  firmware/src/motors.c firmware/src/rc_receiver.c firmware/src/telemetry.c `
+  firmware/src/biquad.c firmware/src/attitude_mahony.c firmware/src/tiny_nn.c firmware/src/ai_fault_detector.c `
+  firmware/src/flight_controller.c firmware/src/motors.c firmware/src/rc_receiver.c firmware/src/telemetry.c `
   firmware/src/blackbox.c firmware/src/mpu6000.c tests/test_firmware.c -lm -o build/test_firmware.exe
 .\build\test_firmware.exe
 ```
