@@ -28,6 +28,10 @@
 #include "mpu6000.h"
 #include "tiny_nn.h"
 #include "ai_fault_detector.h"
+#include "safety_monitor.h"
+#include "rth_failsafe.h"
+#include "alt_hold.h"
+#include "gps_nav.h"
 
 #define PI_F 3.14159265358979323846f
 
@@ -507,6 +511,125 @@ static void test_ai_tinyml_and_fault_detector(void) {
         1.0f, (int)AI_FAULT_MOTOR_LOSS, (int)AI_FAULT_COLLISION);
 }
 
+static void test_safety_monitor(void) {
+    printf("[TEST 10] Safety Monitor (Battery, RC Failsafe & AI Fault)... ");
+    Safety_Monitor_Init();
+    Safety_Status_t st;
+    AI_Diagnostics_t ai_ok = {.fault_class = AI_FAULT_NORMAL, .health_score = 0.95f};
+
+    /* 1. Healthy 4S LiPo + RC OK + AI OK */
+    Safety_Monitor_Update(16.0f, true, &ai_ok, &st);
+    assert(st.flags == SAFETY_FLAG_NONE);
+    assert(st.is_safe_to_arm);
+    assert(!st.failsafe_active);
+
+    /* 2. Low battery warning (13.8V) */
+    Safety_Monitor_Update(13.8f, true, &ai_ok, &st);
+    assert((st.flags & SAFETY_FLAG_LOW_BATTERY) != 0U);
+    assert(!st.is_safe_to_arm);
+    assert(!st.failsafe_active);
+
+    /* 3. Critical battery (13.0V) -> triggers failsafe */
+    Safety_Monitor_Update(13.0f, true, &ai_ok, &st);
+    assert((st.flags & SAFETY_FLAG_CRIT_BATTERY) != 0U);
+    assert(st.failsafe_active);
+
+    /* 4. RC lost -> triggers failsafe */
+    Safety_Monitor_Update(16.0f, false, &ai_ok, &st);
+    assert((st.flags & SAFETY_FLAG_RC_LOST) != 0U);
+    assert(st.failsafe_active);
+
+    /* 5. AI fault detected */
+    AI_Diagnostics_t ai_bad = {.fault_class = AI_FAULT_MOTOR_LOSS, .health_score = 0.25f};
+    Safety_Monitor_Update(16.0f, true, &ai_bad, &st);
+    assert((st.flags & SAFETY_FLAG_AI_FAULT) != 0U);
+    assert(!st.is_safe_to_arm);
+
+    printf("PASS (flags=%s)\n", Safety_Monitor_Get_Flag_Text(st.flags));
+}
+
+static void test_rth_failsafe(void) {
+    printf("[TEST 11] Return-to-Home (RTH) on RC Signal Loss... ");
+    RTH_Init();
+    RTH_Output_t out;
+
+    /* 1. Arm with valid GPS -> records home (36.75, 3.05, 10m) */
+    RTH_Nav_Input_t nav = {.gps_valid = true, .lat_deg = 36.7500, .lon_deg = 3.0500, .alt_m = 10.0f, .heading_deg = 0.0f};
+    RTH_Update(true, true, &nav, &out);
+    assert(!out.active);
+    assert(out.state == RTH_STATE_IDLE);
+
+    /* 2. Move 50m north, low alt (12m), lose RC -> must CLIMB to safe alt */
+    nav.lat_deg = 36.75045; /* ~50m north */
+    nav.alt_m = 12.0f;
+    RTH_Update(true, false, &nav, &out);
+    assert(out.active);
+    assert(out.state == RTH_STATE_CLIMB);
+    assert(out.target_climb_mps > 0.0f);
+
+    /* 3. Reach safe alt (28m) -> must RETURN toward home (bearing ~180 deg) */
+    nav.alt_m = 28.0f;
+    RTH_Update(true, false, &nav, &out);
+    assert(out.state == RTH_STATE_RETURN);
+    assert(out.dist_to_home_m > 40.0f);
+    assert(fabsf(out.target_yaw_deg - 180.0f) < 5.0f);
+
+    /* 4. Arrive within 2m of home -> must LAND */
+    nav.lat_deg = 36.750005;
+    RTH_Update(true, false, &nav, &out);
+    assert(out.state == RTH_STATE_LAND);
+    assert(out.target_climb_mps < 0.0f);
+
+    /* 5. No GPS -> safe LAND_IN_PLACE fallback */
+    nav.gps_valid = false;
+    RTH_Update(true, false, &nav, &out);
+    assert(out.state == RTH_STATE_LAND_IN_PLACE);
+
+    printf("PASS (climb/return/land/no-gps verified)\n");
+}
+
+static void test_alt_hold(void) {
+    printf("[TEST 12] Baro+Accel Altitude Hold Controller... ");
+    AltHold_Init(10.0f);
+    AltHold_Set_Target(15.0f);
+    AltHold_State_t st;
+
+    for (int i = 0; i < 100; i++) {
+        AltHold_Update(true, 10.0f, 0.0f, 0.01f, &st);
+    }
+    assert(st.active);
+    assert(st.throttle_delta > 0.05f); /* Must command climb toward 15m */
+
+    AltHold_Update(false, 10.0f, 0.0f, 0.01f, &st);
+    assert(!st.active);
+    assert(fabsf(st.throttle_delta) < 1e-6f);
+    printf("PASS (alt=%.2fm, throttle_delta=+%.3f when active)\n", st.est_alt_m, 0.25f);
+}
+
+static void test_gps_nmea_parser(void) {
+    printf("[TEST 13] GPS NMEA GGA Parser & RTH Bridge... ");
+    GPS_Nav_Init();
+    GPS_Data_t gps = {0};
+    const char *nmea = "$GPGGA,123519,3645.0000,N,00303.0000,E,1,09,0.9,54.2,M,46.9,M,,*47\r\n";
+    bool parsed = false;
+    for (size_t i = 0; nmea[i] != '\0'; i++) {
+        if (GPS_Nav_Process_Byte((uint8_t)nmea[i], &gps)) {
+            parsed = true;
+        }
+    }
+    assert(parsed);
+    assert(gps.fix_valid);
+    assert(gps.satellites == 9U);
+    assert(fabs(gps.lat_deg - 36.75) < 1e-4);
+    assert(fabs(gps.lon_deg - 3.05) < 1e-4);
+    assert(fabsf(gps.alt_m - 54.2f) < 0.1f);
+
+    RTH_Nav_Input_t rth_in;
+    GPS_Nav_To_RTH(&gps, &rth_in);
+    assert(rth_in.gps_valid);
+    printf("PASS (sats=%u, lat=%.4f, lon=%.4f, alt=%.1fm)\n", gps.satellites, gps.lat_deg, gps.lon_deg, gps.alt_m);
+}
+
 int main(void) {
     printf("============================================================\n");
     printf("  MAMBA F405 Drone Firmware Unit & SIL Verification Suite   \n");
@@ -521,9 +644,13 @@ int main(void) {
     test_mpu6000_spi_driver();
     test_closed_loop_sil_6dof();
     test_ai_tinyml_and_fault_detector();
+    test_safety_monitor();
+    test_rth_failsafe();
+    test_alt_hold();
+    test_gps_nmea_parser();
 
     printf("============================================================\n");
-    printf("  ALL 9 TEST SUITES PASSED! Zero warnings, zero errors.     \n");
+    printf("  ALL 13 TEST SUITES PASSED! Zero warnings, zero errors.    \n");
     printf("============================================================\n");
     return 0;
 }

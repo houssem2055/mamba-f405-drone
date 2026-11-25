@@ -60,6 +60,25 @@ void Telemetry_Send_AI_Frame(const Attitude_t *att, const AI_Diagnostics_t *ai) 
     }
 }
 
+void Telemetry_Send_Nav_Frame(const RTH_Output_t *rth, const Safety_Status_t *safety, float est_alt_m, uint8_t gps_sats) {
+    if (!rth || !safety) return;
+
+    char buffer[128];
+    /* Format: $NAV,alt_m,dist_home_m,rth_state,safety_flags,gps_sats\r\n */
+    int len = snprintf(buffer, sizeof(buffer),
+        "$NAV,%.2f,%.1f,%u,%u,%u\r\n",
+        est_alt_m,
+        rth->dist_to_home_m,
+        (unsigned int)rth->state,
+        (unsigned int)safety->flags,
+        (unsigned int)gps_sats
+    );
+
+    if (len > 0) {
+        UART6_SendString(buffer);
+    }
+}
+
 void Telemetry_Send_PID_Gains(void) {
     PID_Gains_t g;
     Flight_Controller_Get_Gains(&g);
