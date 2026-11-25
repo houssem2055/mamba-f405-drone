@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+cmake-build-*/
+*.elf
+*.bin
+*.hex
+*.o
+*.d
+*.map
+
+# MATLAB / Simulink temporary & codegen outputs
+matlab/codegen/
+matlab/slprj/
+*.asv
+*.mex*
+*.autosave
+
+# Python cache
+__pycache__/
+*.pyc
+.venv/
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
