@@ -87,8 +87,26 @@ The controller uses a standard two-tier cascaded architecture:
      $$q_{\text{ref}} = K_{p,\text{angle}} (\theta_{\text{ref}} - \hat{\theta})$$
 
 2. **Inner Loop (Angular Rate Controller - 1000 Hz)**:
-   * Compares desired rate $(p_{\text{ref}}, q_{\text{ref}}, r_{\text{ref}})$ with measured gyro rates $(p, q, r)$.
-   * High-speed PID loop with anti-windup:
-     $$\Delta\phi = K_{p,p} e_p + K_{i,p} \int e_p dt + K_{d,p} \frac{d e_p}{dt}$$
-     $$\Delta\theta = K_{p,q} e_q + K_{i,q} \int e_q dt + K_{d,q} \frac{d e_q}{dt}$$
-     $$\Delta\psi = K_{p,r} e_r + K_{i,r} \int e_r dt + K_{d,r} \frac{d e_r}{dt}$$
+   * Compares desired rate $(p_{\text{ref}}, q_{\text{ref}}, r_{\text{ref}})$ with filtered gyro rates $(p, q, r)$.
+   * High-speed PID with **Derivative-on-Measurement** (eliminates derivative kick), **70 Hz 2nd-order Butterworth D-term LPF**, **Setpoint Feedforward**, **Anti-Windup**, **TPA**, and **Battery Voltage Sag Compensation**:
+     $$\Delta\phi = \text{TPA} \cdot V_{\text{comp}} \cdot \left(K_{p,p} e_p - K_{d,p} \frac{d p_{\text{filt}}}{dt} + K_{f,p} \dot{p}_{\text{ref}}\right) + K_{i,p} \int e_p dt$$
+
+---
+
+## 5. Upgraded Aerospace Subsystems
+
+### 5.1 Singularity-Free Quaternion Mahony AHRS
+Instead of integrating Euler angles directly (which suffer gimbal lock near $\theta = \pm 90^\circ$ during aerobatic maneuvers), attitude is represented by unit quaternion $\mathbf{q} = [q_0, q_1, q_2, q_3]^T$:
+$$\dot{\mathbf{q}} = \frac{1}{2} \mathbf{q} \otimes \begin{bmatrix} 0 \\ \boldsymbol{\omega}_{\text{gyro}} + K_p w(a) (\hat{\mathbf{a}} \times \hat{\mathbf{v}}(\mathbf{q})) + K_i \int w(a) (\hat{\mathbf{a}} \times \hat{\mathbf{v}}(\mathbf{q})) dt \end{bmatrix}$$
+where $w(a) = \max(0, 1 - 1.5 |\frac{\|\mathbf{a}\|}{g} - 1|)$ rejects accelerometer distortion during high-G maneuvers or freefall.
+
+### 5.2 Digital Biquad Signal Conditioning
+* **Gyro 2nd-Order Butterworth LPF ($f_c = 90\text{ Hz}$, $Q = 1/\sqrt{2}$)**: attenuates high-frequency motor/frame noise before the PID loop.
+* **Gyro 2nd-Order Notch Filter ($f_0 = 220\text{ Hz}$, $Q = 2.5$)**: targets dominant propeller harmonic resonance ($>26\text{ dB}$ attenuation at $220\text{ Hz}$).
+* Implemented in Transposed Direct Form II (`biquad.c` / `biquad_filter.m`) for single-precision FPU numerical stability.
+
+### 5.3 Airmode Dynamic Mixer Desaturation
+If any motor command exceeds $[\text{PWM}_{\text{idle}}, \text{PWM}_{\text{max}}] = [1060, 2000]\ \mu\text{s}$, the collective base thrust is shifted dynamically (and differential demands scaled proportionally only if span $> 940\ \mu\text{s}$), preserving roll/pitch/yaw authority even at $0\%$ or $100\%$ throttle.
+
+### 5.4 Optimal LQR Synthesis & Stability Margins
+For linearized hover state $\mathbf{x} = [\phi, p, u_m]^T$ (including $20\text{ ms}$ motor lag $\tau_m$), optimal state feedback $u = -K_{\text{LQR}} \mathbf{x} + \bar{N} \phi_{\text{ref}}$ is synthesized via `lqr_and_bode_analysis.m`, alongside frequency-domain open-loop Bode margin verification ($74.9^\circ$ Phase Margin, $\infty\text{ dB}$ Gain Margin).

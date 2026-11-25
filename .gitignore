@@ -15,10 +15,12 @@ matlab/slprj/
 *.mex*
 *.autosave
 
-# Python cache
+# Python cache & logs
 __pycache__/
 *.pyc
 .venv/
+flight_log.csv
+tests/sil_c_results.csv
 
 # OS & IDE files
 .DS_Store

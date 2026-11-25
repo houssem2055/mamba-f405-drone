@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Diagnostic Serial Telemetry Monitor for Mamba F405 Drone.
-Reads incoming telemetry frames ($TLM,roll,pitch,yaw,m1,m2,m3,m4,vbat) from USB UART.
+Pro Diagnostic Serial Telemetry Monitor & CSV Blackbox Logger for MAMBA F405 Drone.
+Parses 13-field telemetry frames:
+  $TLM,roll,pitch,yaw,gx,gy,gz,m1,m2,m3,m4,vbat,armed,mode
+and logs all frames to flight_log.csv.
 """
 
+import csv
 import sys
 import time
 
@@ -11,8 +14,10 @@ try:
     import serial
     import serial.tools.list_ports
 except ImportError:
-    print("[ERROR] pyserial is not installed. Install it with: pip install pyserial")
+    print("[ERROR] pyserial is not installed. Install with: pip install pyserial")
     sys.exit(1)
+
+MODES = {0: "ACRO", 1: "ANGLE", 2: "HORIZON"}
 
 
 def list_ports():
@@ -24,9 +29,9 @@ def list_ports():
 
 
 def main():
-    print("==================================================")
-    print("    MAMBA F405 Telemetry Test Monitor (Python)    ")
-    print("==================================================")
+    print("==========================================================")
+    print("  MAMBA F405 Pro Telemetry Monitor & CSV Flight Logger    ")
+    print("==========================================================")
 
     ports = list_ports()
     if not ports:
@@ -37,31 +42,46 @@ def main():
         print(f"[INFO] Using detected port: {port}")
 
     baud = 115200
+    log_file = "flight_log.csv"
 
     try:
         ser = serial.Serial(port, baud, timeout=1.0)
         ser.reset_input_buffer()
-        print(f"[SUCCESS] Connected to {port} @ {baud} bps. Listening for telemetry...\n")
+        ser.write(b"$CMD,PING\n")
+        ser.write(b"$CMD,GET_PID\n")
+        print(f"[SUCCESS] Connected to {port} @ {baud} bps. Logging to {log_file}...\n")
 
-        while True:
-            line = ser.readline().decode("utf-8", errors="replace").strip()
-            if line.startswith("$TLM"):
-                parts = line.split(",")
-                if len(parts) >= 8:
-                    roll, pitch, yaw = parts[1], parts[2], parts[3]
-                    m1, m2, m3, m4 = parts[4], parts[5], parts[6], parts[7]
-                    vbat = parts[8] if len(parts) > 8 else "N/A"
-                    print(
-                        f"\rRoll: {roll:>6}° | Pitch: {pitch:>6}° | Yaw: {yaw:>6}° | "
-                        f"Motors: [{m1}, {m2}, {m3}, {m4}] | VBat: {vbat}V",
-                        end="",
-                        flush=True,
-                    )
-            elif line:
-                print(f"[RAW]: {line}")
+        with open(log_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp", "roll_deg", "pitch_deg", "yaw_deg",
+                "gx_rads", "gy_rads", "gz_rads",
+                "m1", "m2", "m3", "m4", "vbat", "armed", "mode"
+            ])
+
+            while True:
+                line = ser.readline().decode("utf-8", errors="replace").strip()
+                if line.startswith("$TLM,"):
+                    parts = line.split(",")
+                    if len(parts) >= 14:
+                        roll, pitch, yaw = parts[1], parts[2], parts[3]
+                        gx, gy, gz = parts[4], parts[5], parts[6]
+                        m1, m2, m3, m4 = parts[7], parts[8], parts[9], parts[10]
+                        vbat = parts[11]
+                        armed = "ARMED" if parts[12] == "1" else "DISARM"
+                        mode = MODES.get(int(parts[13]), parts[13])
+                        writer.writerow([time.time(), roll, pitch, yaw, gx, gy, gz, m1, m2, m3, m4, vbat, parts[12], parts[13]])
+                        print(
+                            f"\r[{armed:<6} | {mode:<7}] R:{roll:>6}° P:{pitch:>6}° Y:{yaw:>6}° | "
+                            f"M:[{m1},{m2},{m3},{m4}] | {vbat}V",
+                            end="",
+                            flush=True,
+                        )
+                elif line:
+                    print(f"\n[FC]: {line}")
 
     except KeyboardInterrupt:
-        print("\n[INFO] Stopped by user.")
+        print(f"\n[INFO] Stopped. Flight log saved to {log_file}.")
     except Exception as e:
         print(f"\n[ERROR]: {e}")
     finally:

@@ -1,223 +1,243 @@
 %% drone_simulation.m
-% 6-DOF Non-Linear Quadcopter Flight Dynamic Simulator with Mamba F405 Controller
+% Pro-Grade 6-DOF Quaternion Quadcopter Simulator (No Gimbal Lock)
+% Stress-tests:
+%   - 220 Hz motor vibration harmonics + IMU noise (Biquad LPF + Notch)
+%   - External wind gust disturbance rejection
+%   - Battery voltage sag (16.4V -> 14.6V) compensation
+%   - Angle Mode steps + full 360-degree Acro barrel roll + self-level recovery
 clear; close all; clc;
 
-fprintf('====================================================\n');
-fprintf('  Running Quadcopter 6-DOF Closed-Loop Simulation   \n');
-fprintf('====================================================\n');
-
+fprintf('============================================================\n');
+fprintf('  Running Pro 6-DOF Quaternion Flight Simulation & Stress   \n');
+fprintf('============================================================\n');
 
 init_drone_parameters;
 
-%% 1. Simulation Setup
-t_final = 8.0;                    % Simulation duration in seconds
-dt      = control.Ts;             % 1 ms sample time (1 kHz loop)
+%% 1. Simulation Timing & Quaternion State Initialization
+t_final = 10.0;
+dt      = control.Ts;
 time    = 0:dt:t_final;
 N       = length(time);
 
-% State Vector: x = [pos(3); vel(3); euler(3); body_rates(3)] -> 12 states
-% pos = [x, y, z]' (NED: z down)
-% vel = [u, v, w]' (inertial frame)
-% euler = [phi, theta, psi]' (roll, pitch, yaw)
-% body_rates = [p, q, r]' (gyro measurements)
-state = zeros(12, 1);
-state(3) = 0.0; % Start on ground (z=0)
+% Rigid body states:
+% pos = [x; y; z] (NED), vel = [vx; vy; vz], q = [q0; q1; q2; q3], omega = [p; q; r]
+pos   = [0; 0; 0];
+vel   = [0; 0; 0];
+q     = [1; 0; 0; 0];
+omega = [0; 0; 0];
+rotor_omega = ones(4, 1) * drone.omega_idle;
 
-% Log vectors
-log_state     = zeros(12, N);
-log_motors    = zeros(4, N);
-log_telemetry = zeros(6, N);
-log_commands  = zeros(4, N);
-
-%% 2. Generate Mission Trajectory Commands
-% rc_cmd: [throttle (0..1); roll_cmd (rad); pitch_cmd (rad); yaw_rate_cmd (rad/s)]
-rc_commands = zeros(4, N);
-
-% Compute exact hover throttle from physical rotor thrust equation: m*g = 4*kt*omega_hover^2
+% Exact hover throttle
 omega_hover = sqrt((drone.m * drone.g) / (4.0 * drone.kt));
 pwm_hover   = drone.pwm_min + ((omega_hover - drone.omega_idle) / (drone.omega_max - drone.omega_idle)) * (drone.pwm_max - drone.pwm_min);
-hover_thr   = (pwm_hover - drone.pwm_idle) / (drone.pwm_max - drone.pwm_idle);
-hover_thr   = min(max(hover_thr, 0.25), 0.70);
+hover_thr   = min(max((pwm_hover - drone.pwm_idle) / (drone.pwm_max - drone.pwm_idle), 0.25), 0.70);
+
+%% 2. Multi-Phase Flight Mission Setup
+rc_commands = zeros(4, N);
+flight_modes = ones(1, N, 'uint8'); % Default: Angle Mode (1)
+vbat_profile = linspace(16.4, 14.6, N); % Simulated 4S LiPo discharge sag
 
 for k = 1:N
     t = time(k);
-    thr = 0.0;
-    roll_cmd = 0.0;
-    pitch_cmd = 0.0;
-    yaw_cmd = 0.0;
-    
+    thr = 0.0; roll_cmd = 0.0; pitch_cmd = 0.0; yaw_cmd = 0.0;
+    mode_k = uint8(1);
+
     if t < 0.5
-        thr = 0.0; % Idle on ground
-    elseif t < 1.5
-        thr = hover_thr + 0.08; % Smooth takeoff climb
+        thr = 0.0;                         % Armed idle on ground
+    elseif t < 2.0
+        thr = hover_thr + 0.14;            % Strong climb to ~14m headroom
     elseif t < 3.0
-        thr = hover_thr; % Stabilize & hover
-    elseif t < 5.0
-        thr = hover_thr + 0.01;
-        roll_cmd = 0.15; % 8.6 degrees roll step
+        thr = hover_thr + 0.01;            % Hover (+ wind gust at t=2.0..2.2s)
+    elseif t < 4.5
+        thr = hover_thr + 0.02;
+        roll_cmd = deg2rad(15.0);          % +15 deg Roll step
+    elseif t < 6.0
+        thr = hover_thr + 0.04;
+        pitch_cmd = deg2rad(-15.0);        % -15 deg Pitch step
     elseif t < 7.0
-        thr = hover_thr + 0.01;
-        roll_cmd = 0.0;
-        pitch_cmd = -0.15; % Forward pitch step
+        mode_k = uint8(0);                 % Switch to ACRO mode for 360-deg Flip!
+        thr = hover_thr + 0.10;
+        roll_cmd = 2.0 * pi / 1.0 * 0.7;   % ~4.4 rad/s (252 deg/s)
+        if t >= 6.82
+            roll_cmd = 0.0;
+        end
+    elseif t < 8.5
+        mode_k = uint8(1);                 % Snap back to ANGLE mode self-level recovery
+        thr = hover_thr + 0.08;
     else
-        thr = hover_thr;
-        yaw_cmd = 0.5; % 0.5 rad/s yaw rotation
+        thr = hover_thr + 0.02;
+        yaw_cmd = 0.8;                     % 0.8 rad/s yaw rotation
     end
-    
+
     rc_commands(:, k) = [thr; roll_cmd; pitch_cmd; yaw_cmd];
+    flight_modes(k)   = mode_k;
 end
 
-%% 3. Main Simulation Loop
-fprintf('Simulating %d steps (%.1f seconds)...\n', N, t_final);
-armed = uint8(1);
-flight_mode = uint8(1); % Angle Mode
-rotor_omega = ones(4, 1) * drone.omega_idle; % Initial rotor speeds
+%% 3. Logging Arrays
+log_pos       = zeros(3, N);
+log_euler     = zeros(3, N);
+log_est_euler = zeros(3, N);
+log_gyro_raw  = zeros(3, N);
+log_gyro_filt = zeros(3, N);
+log_motors    = zeros(4, N);
+log_wind_tau  = zeros(3, N);
+
+%% 4. Main 1 kHz Closed-Loop Simulation
+fprintf('Simulating %d steps (%.1f s) with 220 Hz vibration & wind gust...\n', N, t_final);
+armed   = uint8(1);
+airmode = uint8(1);
+
+% Reset controller persistent state cleanly before run
+clear flight_controller attitude_estimator biquad_filter;
+rng(42); % Reproducible noise seed
 
 for k = 1:N
-    % Current states
-    pos   = state(1:3);
-    vel   = state(4:6);
-    euler = state(7:9);
-    omega = state(10:12);
-    
-    phi   = euler(1);
-    theta = euler(2);
-    psi   = euler(3);
-    p = omega(1); q = omega(2); r = omega(3);
-    
-    % --- Sensor Emulation (MPU6000 on Mamba F405) ---
-    % True Body-to-Inertial rotation matrix R_B^I (Z-Y-X Euler, matching docs/quadcopter_dynamics.md)
-    R_IB = [cos(theta)*cos(psi), sin(phi)*sin(theta)*cos(psi) - cos(phi)*sin(psi), cos(phi)*sin(theta)*cos(psi) + sin(phi)*sin(psi);
-            cos(theta)*sin(psi), sin(phi)*sin(theta)*sin(psi) + cos(phi)*cos(psi), cos(phi)*sin(theta)*sin(psi) - sin(phi)*cos(psi);
-            -sin(theta),         sin(phi)*cos(theta),                              cos(phi)*cos(theta)];
+    t = time(k);
+    q0 = q(1); q1 = q(2); q2 = q(3); q3 = q(4);
+
+    % Rotation matrix Body -> Inertial (from unit quaternion)
+    R_IB = [1 - 2*(q2^2 + q3^2), 2*(q1*q2 - q0*q3),     2*(q1*q3 + q0*q2);
+            2*(q1*q2 + q0*q3),     1 - 2*(q1^2 + q3^2), 2*(q2*q3 - q0*q1);
+            2*(q1*q3 - q0*q2),     2*(q2*q3 + q0*q1),     1 - 2*(q1^2 + q2^2)];
     R_BI = R_IB';
-    
-    % Gravity reaction vector in body frame (NED: +g along +Z when level)
-    g_body = R_BI * [0; 0; drone.g];
-    
-    % Add realistic IMU noise
-    acc_noise  = 0.08 * randn(3, 1);
-    gyro_noise = 0.005 * randn(3, 1);
-    
-    accel_meas = g_body + acc_noise;
-    gyro_meas  = omega + gyro_noise;
-    
-    % --- Call Embedded Flight Controller ---
+
+    % True Euler angles for logging
+    true_roll  = atan2(2*(q0*q1 + q2*q3), 1 - 2*(q1^2 + q2^2));
+    true_pitch = asin(max(min(2*(q0*q2 - q3*q1), 1.0), -1.0));
+    true_yaw   = atan2(2*(q0*q3 + q1*q2), 1 - 2*(q2^2 + q3^2));
+
+    % --- Sensor Simulation (MPU6000 with 220 Hz Frame Resonance + Noise) ---
+    vib_220hz = 0.08 * sin(2 * pi * 220.0 * t); % Strong 220 Hz prop-wash vibration
+    accel_meas = R_BI * [0; 0; drone.g] + 0.12 * randn(3, 1);
+    gyro_meas  = omega + [vib_220hz; -0.8*vib_220hz; 0.3*vib_220hz] + 0.008 * randn(3, 1);
+
+    % --- Execute Flight Controller ---
     rc_in = rc_commands(:, k);
-    [motors_pwm, telem] = flight_controller(rc_in, accel_meas, gyro_meas, armed, flight_mode, dt);
-    
-    % --- Actuator Model (PWM -> First-Order Motor Lag -> Rotor Speed -> Thrust & Torques) ---
-    % Map PWM (1000..2000 us) to target rotor speed (rad/s)
-    pwm_norm = (motors_pwm - drone.pwm_min) / (drone.pwm_max - drone.pwm_min);
-    pwm_norm = max(min(pwm_norm, 1.0), 0.0);
-    rotor_omega_cmd = drone.omega_idle + pwm_norm * (drone.omega_max - drone.omega_idle);
+    [motors_pwm, telem] = flight_controller(rc_in, accel_meas, gyro_meas, armed, flight_modes(k), dt, vbat_profile(k), airmode);
+
+    % --- Actuator Dynamics (Vbat scaling + 1st-Order Motor Lag) ---
+    vbat_thrust_factor = vbat_profile(k) / drone.vbat_nom;
+    pwm_norm = max(min((motors_pwm - drone.pwm_min) / (drone.pwm_max - drone.pwm_min), 1.0), 0.0);
+    rotor_omega_cmd = (drone.omega_idle + pwm_norm * (drone.omega_max - drone.omega_idle)) * sqrt(vbat_thrust_factor);
     rotor_omega     = rotor_omega + (dt / drone.motor_tau) * (rotor_omega_cmd - rotor_omega);
-    
-    % Rotor thrusts & drag torques: T = kt * w^2, Q = km * w^2
+
     thrusts = drone.kt * (rotor_omega .^ 2);
     torques = drone.km * (rotor_omega .^ 2);
-    
     T_total = sum(thrusts);
-    
-    % Torques in body frame (Quad-X configuration):
-    % Motor 1 (Rear-Right, CCW):  [-d, -d]
-    % Motor 2 (Front-Right, CW):  [+d, -d]
-    % Motor 3 (Rear-Left, CW):    [-d, +d]
-    % Motor 4 (Front-Left, CCW):  [+d, +d]
+
+    % Wind gust disturbance torque impulse at t = 2.0 .. 2.2 s
+    tau_wind = [0; 0; 0];
+    if t >= 2.0 && t <= 2.2
+        tau_wind = [0.045; -0.025; 0.0];
+    end
+
     tau_phi   = drone.d * (-thrusts(1) - thrusts(2) + thrusts(3) + thrusts(4));
     tau_theta = drone.d * (-thrusts(1) + thrusts(2) - thrusts(3) + thrusts(4));
     tau_psi   = -torques(1) + torques(2) + torques(3) - torques(4);
-    
-    tau_body = [tau_phi; tau_theta; tau_psi];
-    
-    % --- 6-DOF Equations of Motion Integration ---
-    % 1. Rotational Accelerations (Euler's Equations)
-    % J * domega/dt + omega x (J * omega) = tau
+    tau_body  = [tau_phi; tau_theta; tau_psi] + tau_wind - drone.drag_rot * omega;
+
+    % --- 6-DOF Rigid-Body Dynamics Integration ---
     omega_dot = drone.J \ (tau_body - cross(omega, drone.J * omega));
-    
-    % 2. Kinematic Equations (Body rates -> Euler rates)
-    W_inv = [1, sin(phi)*tan(theta), cos(phi)*tan(theta);
-             0, cos(phi),            -sin(phi);
-             0, sin(phi)/cos(theta), cos(phi)/cos(theta)];
-    euler_dot = W_inv * omega;
-    
-    % 3. Translational Accelerations (Newton's 2nd Law)
-    thrust_inertial = R_IB * [0; 0; -T_total];
-    gravity_inertial = [0; 0; drone.m * drone.g];
-    drag_inertial    = -0.15 * vel; % Linear aerodynamic drag
-    
-    acc_inertial = (thrust_inertial + gravity_inertial + drag_inertial) / drone.m;
-    
-    % Ground contact model: cannot penetrate below z=0
-    if state(3) >= 0 && acc_inertial(3) > 0 && T_total < (drone.m * drone.g)
-        vel(3) = 0;
-        acc_inertial(3) = 0;
-        state(3) = 0;
+    omega     = omega + omega_dot * dt;
+
+    % Quaternion kinematics integration (singularity-free)
+    p = omega(1); q_rate = omega(2); r = omega(3);
+    q_dot = 0.5 * [-q1*p - q2*q_rate - q3*r;
+                    q0*p + q2*r      - q3*q_rate;
+                    q0*q_rate - q1*r + q3*p;
+                    q0*r + q1*q_rate - q2*p];
+    q = q + q_dot * dt;
+    q = q / norm(q);
+
+    % Translational dynamics
+    acc_inertial = (R_IB * [0; 0; -T_total] + [0; 0; drone.m * drone.g] - drone.drag_lin * vel) / drone.m;
+    if pos(3) >= 0 && acc_inertial(3) > 0 && T_total < (drone.m * drone.g)
+        vel(3) = 0; acc_inertial(3) = 0; pos(3) = 0;
     end
-    
-    % Euler integration
-    state(1:3)   = state(1:3) + vel * dt;
-    state(4:6)   = state(4:6) + acc_inertial * dt;
-    state(7:9)   = state(7:9) + euler_dot * dt;
-    state(10:12) = state(10:12) + omega_dot * dt;
-    
-    % Enforce ground plane
-    if state(3) > 0
-        state(3) = 0;
-        state(6) = 0;
+    vel = vel + acc_inertial * dt;
+    pos = pos + vel * dt;
+    if pos(3) > 0
+        pos(3) = 0; vel(3) = 0;
     end
-    
-    % Save logs
-    log_state(:, k)     = state;
+
+    % Log
+    log_pos(:, k)       = pos;
+    log_euler(:, k)     = [true_roll; true_pitch; true_yaw];
+    log_est_euler(:, k) = telem(1:3);
+    log_gyro_raw(:, k)  = gyro_meas;
+    log_gyro_filt(:, k) = telem(4:6);
     log_motors(:, k)    = motors_pwm;
-    log_telemetry(:, k) = telem;
-    log_commands(:, k)  = rc_in;
+    log_wind_tau(:, k)  = tau_wind;
 end
 
-fprintf('Simulation complete. Generating response plots...\n');
+%% 5. Export Comprehensive Multi-Panel Plot
+out_dir = fullfile(fileparts(mfilename('fullpath')), '..', 'docs');
 
-%% 4. Plotting Results
-figure('Name', 'Mamba F405 Drone Closed-Loop Flight Simulation', 'Color', 'w', 'Position', [100, 100, 1200, 800]);
+fig1 = figure('Name', 'MAMBA F405 Pro 6-DOF Simulation', 'Color', 'w', 'Position', [80, 60, 1400, 880], 'Visible', 'off');
 
-% 1. Attitude Angles (Roll, Pitch, Yaw)
-subplot(2, 2, 1);
-plot(time, rad2deg(log_state(7, :)), 'r', 'LineWidth', 1.8); hold on;
-plot(time, rad2deg(log_commands(2, :)), 'r--', 'LineWidth', 1.2);
-plot(time, rad2deg(log_state(8, :)), 'b', 'LineWidth', 1.8);
-plot(time, rad2deg(log_commands(3, :)), 'b--', 'LineWidth', 1.2);
-plot(time, rad2deg(log_state(9, :)), 'k', 'LineWidth', 1.5);
-grid on;
-xlabel('Time (s)'); ylabel('Angle (deg)');
-title('Euler Angles (Solid: Actual, Dashed: Commanded)');
-legend('\phi (Roll)', '\phi_{cmd}', '\theta (Pitch)', '\theta_{cmd}', '\psi (Yaw)', 'Location', 'best');
+subplot(3, 2, 1);
+plot(time, rad2deg(log_euler(1, :)), 'r', 'LineWidth', 1.7); hold on;
+plot(time, rad2deg(log_est_euler(1, :)), 'r:', 'LineWidth', 1.3);
+plot(time, rad2deg(log_euler(2, :)), 'b', 'LineWidth', 1.7);
+plot(time, rad2deg(log_euler(3, :)), 'k', 'LineWidth', 1.4);
+xline(2.0, '--m', 'Wind Gust'); xline(6.0, '--g', 'Acro Flip'); xline(7.0, '--c', 'Angle Recov.');
+grid on; xlabel('Time (s)'); ylabel('Angle (deg)');
+title('Attitude Response (Quaternion AHRS + Wind Gust + Acro Flip)');
+legend('\phi True', '\phi Mahony Est', '\theta True', '\psi True', 'Location', 'best');
 
-% 2. Body Angular Rates
-subplot(2, 2, 2);
-plot(time, rad2deg(log_state(10, :)), 'r', 'LineWidth', 1.5); hold on;
-plot(time, rad2deg(log_state(11, :)), 'b', 'LineWidth', 1.5);
-plot(time, rad2deg(log_state(12, :)), 'k', 'LineWidth', 1.5);
-grid on;
-xlabel('Time (s)'); ylabel('Rate (deg/s)');
-title('Body Angular Rates (Gyro)');
-legend('p (Roll rate)', 'q (Pitch rate)', 'r (Yaw rate)', 'Location', 'best');
+subplot(3, 2, 2);
+plot(time, rad2deg(log_gyro_raw(1, :)), 'Color', [0.85 0.65 0.65], 'LineWidth', 0.8); hold on;
+plot(time, rad2deg(log_gyro_filt(1, :)), 'r', 'LineWidth', 1.6);
+plot(time, rad2deg(log_gyro_filt(2, :)), 'b', 'LineWidth', 1.4);
+grid on; xlabel('Time (s)'); ylabel('Rate (deg/s)');
+title('Gyro Filtering: Raw (220Hz Vib + Noise) vs 90Hz LPF + 220Hz Notch');
+legend('p Raw (Noisy)', 'p Filtered', 'q Filtered', 'Location', 'best');
 
-% 3. Motor PWM Outputs
-subplot(2, 2, 3);
-plot(time, log_motors(1, :), 'LineWidth', 1.3); hold on;
-plot(time, log_motors(2, :), 'LineWidth', 1.3);
-plot(time, log_motors(3, :), 'LineWidth', 1.3);
-plot(time, log_motors(4, :), 'LineWidth', 1.3);
-yline(1000, 'k:'); yline(2000, 'k:');
-grid on;
-xlabel('Time (s)'); ylabel('Pulse Width (\mus)');
-title('ESC Motor Outputs (1000 - 2000 \mus)');
-legend('M1 (Rear-R)', 'M2 (Front-R)', 'M3 (Rear-L)', 'M4 (Front-L)', 'Location', 'best');
+subplot(3, 2, 3);
+plot(time, log_motors(1, :), 'LineWidth', 1.2); hold on;
+plot(time, log_motors(2, :), 'LineWidth', 1.2);
+plot(time, log_motors(3, :), 'LineWidth', 1.2);
+plot(time, log_motors(4, :), 'LineWidth', 1.2);
+yline(1060, 'k:'); yline(2000, 'k:');
+grid on; xlabel('Time (s)'); ylabel('PWM (\mus)');
+title('ESC Motor Outputs (With Airmode Desaturation)');
+legend('M1 (RR)', 'M2 (FR)', 'M3 (RL)', 'M4 (FL)', 'Location', 'best');
 
-% 4. Altitude (Position Z)
-subplot(2, 2, 4);
-plot(time, -log_state(3, :), 'Color', [0 0.5 0], 'LineWidth', 1.8);
-grid on;
-xlabel('Time (s)'); ylabel('Height (m)');
-title('Drone Altitude');
+subplot(3, 2, 4);
+plot(time, -log_pos(3, :), 'Color', [0 0.55 0.15], 'LineWidth', 1.8);
+grid on; xlabel('Time (s)'); ylabel('Altitude (m)');
+title('Altitude Trajectory');
 
-fprintf('Done! All results successfully plotted.\n');
+subplot(3, 2, 5);
+plot(time, log_pos(1, :), 'LineWidth', 1.5); hold on;
+plot(time, log_pos(2, :), 'LineWidth', 1.5);
+grid on; xlabel('Time (s)'); ylabel('Position (m)');
+title('Horizontal Displacement (X North, Y East)');
+legend('X (m)', 'Y (m)', 'Location', 'best');
+
+subplot(3, 2, 6);
+yyaxis left;
+plot(time, vbat_profile, 'b', 'LineWidth', 1.6);
+ylabel('Battery Voltage (V)');
+yyaxis right;
+plot(time, log_wind_tau(1, :), 'm', 'LineWidth', 1.6);
+ylabel('Wind Disturbance Torque (N\cdotm)');
+grid on; xlabel('Time (s)');
+title('4S LiPo Voltage Sag & Wind Gust Injection');
+
+exportgraphics(fig1, fullfile(out_dir, 'simulation_results.png'), 'Resolution', 150);
+close(fig1);
+
+%% 6. Export 3D Trajectory Plot
+fig2 = figure('Name', '3D Quadcopter Flight Path', 'Color', 'w', 'Position', [120, 120, 900, 680], 'Visible', 'off');
+plot3(log_pos(1, :), log_pos(2, :), -log_pos(3, :), 'b-', 'LineWidth', 2.0); hold on;
+scatter3(log_pos(1, 1), log_pos(2, 1), -log_pos(3, 1), 80, 'g', 'filled');
+scatter3(log_pos(1, end), log_pos(2, end), -log_pos(3, end), 80, 'r', 'filled');
+grid on; axis equal; view(40, 28);
+xlabel('X North (m)'); ylabel('Y East (m)'); zlabel('Altitude Z (m)');
+title('3D Flight Trajectory (Takeoff, Wind Gust, Roll/Pitch Steps, 360^\circ Flip & Recovery)');
+legend('Flight Path', 'Start', 'End', 'Location', 'best');
+exportgraphics(fig2, fullfile(out_dir, '3d_flight_trajectory.png'), 'Resolution', 150);
+close(fig2);
+
+fprintf('Done! Exported simulation_results.png and 3d_flight_trajectory.png.\n');

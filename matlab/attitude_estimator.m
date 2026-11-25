@@ -1,88 +1,97 @@
-function [roll, pitch, yaw] = attitude_estimator(accel, gyro, dt, reset)
+function [roll, pitch, yaw, q_out] = attitude_estimator(accel, gyro, dt, reset)
 %#codegen
-% ATTITUDE_ESTIMATOR
-% Fuses Accelerometer (m/s^2) and Gyroscope (rad/s) data into Euler angles (rad).
-% Designed for direct MATLAB Coder compilation into embedded C.
+% ATTITUDE_ESTIMATOR (Quaternion Mahony AHRS)
+% Singularity-free quaternion sensor fusion combining accelerometer (m/s^2)
+% and gyroscope (rad/s) with adaptive acceleration gating and online gyro
+% bias compensation. Matches firmware/src/attitude_mahony.c.
 %
 % Inputs:
 %   accel: [ax; ay; az] in m/s^2
 %   gyro:  [gx; gy; gz] in rad/s (body angular rates: p, q, r)
-%   dt:    Sample time in seconds (e.g. 0.001 for 1kHz)
-%   reset: Boolean flag to re-initialize attitude from accelerometer
+%   dt:    Sample time in seconds (e.g., 0.001 for 1 kHz)
+%   reset: Boolean flag to re-initialize quaternion from accelerometer
 %
 % Outputs:
 %   roll:  Estimated roll angle (rad)
 %   pitch: Estimated pitch angle (rad)
-%   yaw:   Estimated yaw angle (rad, integrated from gyro)
+%   yaw:   Estimated yaw angle (rad)
+%   q_out: Unit quaternion [q0; q1; q2; q3]
 
-    % Persistent states across sample steps
-    persistent est_roll est_pitch est_yaw initialized;
+    persistent q integral_err initialized;
     if isempty(initialized) || reset
-        est_roll  = 0.0;
-        est_pitch = 0.0;
-        est_yaw   = 0.0;
+        ax = accel(1); ay = accel(2); az = accel(3);
+        norm_acc = sqrt(ax*ax + ay*ay + az*az);
+        if norm_acc >= 3.0 && norm_acc <= 18.0
+            roll0  = atan2(ay, az);
+            pitch0 = atan2(-ax, sqrt(ay*ay + az*az));
+            cr = cos(roll0 * 0.5); sr = sin(roll0 * 0.5);
+            cp = cos(pitch0 * 0.5); sp = sin(pitch0 * 0.5);
+            q = [cr * cp; sr * cp; cr * sp; -sr * sp];
+        else
+            q = [1.0; 0.0; 0.0; 0.0];
+        end
+        integral_err = [0.0; 0.0; 0.0];
         initialized = true;
     end
 
-    ax = accel(1);
-    ay = accel(2);
-    az = accel(3);
+    Kp_mahony = 2.5;   % Proportional accel trust gain
+    Ki_mahony = 0.05;  % Integral gyro bias tracking gain
 
-    gx = gyro(1);
-    gy = gyro(2);
-    gz = gyro(3);
+    ax = accel(1); ay = accel(2); az = accel(3);
+    gx = gyro(1);  gy = gyro(2);  gz = gyro(3);
 
-    % 1. Compute Pitch and Roll from Accelerometer (gravity vector)
-    % Roll: rotation around X-axis -> atan2(ay, az)
-    % Pitch: rotation around Y-axis -> atan2(-ax, sqrt(ay^2 + az^2))
+    q0 = q(1); q1 = q(2); q2 = q(3); q3 = q(4);
+
+    % 1. Adaptive Accelerometer Correction (rejects freefall/high-g linear accel)
     norm_acc = sqrt(ax*ax + ay*ay + az*az);
-    if norm_acc > 3.0 && norm_acc < 18.0 % Validate gravity is within sensible bounds (0.3g - 1.8g)
-        acc_roll  = atan2(ay, az);
-        acc_pitch = atan2(-ax, sqrt(ay*ay + az*az));
-    else
-        % Under high linear acceleration / freefall, trust only gyro
-        acc_roll  = est_roll;
-        acc_pitch = est_pitch;
+    if norm_acc > 3.0 && norm_acc < 18.0
+        inv_norm = 1.0 / norm_acc;
+        ax_n = ax * inv_norm;
+        ay_n = ay * inv_norm;
+        az_n = az * inv_norm;
+
+        % Gravity direction estimated from quaternion
+        vx = 2.0 * (q1*q3 - q0*q2);
+        vy = 2.0 * (q0*q1 + q2*q3);
+        vz = q0*q0 - q1*q1 - q2*q2 + q3*q3;
+
+        % Cross product error: accel_norm x v_est
+        ex = ay_n * vz - az_n * vy;
+        ey = az_n * vx - ax_n * vz;
+        ez = ax_n * vy - ay_n * vx;
+
+        % Smoothly attenuate trust if specific force deviates from 1g
+        g_err = abs(norm_acc - 9.81) / 9.81;
+        weight = max(0.0, 1.0 - 1.5 * g_err);
+
+        integral_err(1) = integral_err(1) + Ki_mahony * weight * ex * dt;
+        integral_err(2) = integral_err(2) + Ki_mahony * weight * ey * dt;
+        integral_err(3) = integral_err(3) + Ki_mahony * weight * ez * dt;
+
+        gx = gx + Kp_mahony * weight * ex + integral_err(1);
+        gy = gy + Kp_mahony * weight * ey + integral_err(2);
+        gz = gz + Kp_mahony * weight * ez + integral_err(3);
     end
 
-    % 2. Gyro Kinematic Transformation to Euler Angle Rates
-    % [dphi/dt; dtheta/dt; dpsi/dt] = W * [p; q; r]
-    sr = sin(est_roll);
-    cr = cos(est_roll);
-    tp = tan(est_pitch);
-    cp = cos(est_pitch);
+    % 2. Quaternion Kinematics Integration
+    half_dt = 0.5 * dt;
+    q0_new = q0 + half_dt * (-q1*gx - q2*gy - q3*gz);
+    q1_new = q1 + half_dt * ( q0*gx + q2*gz - q3*gy);
+    q2_new = q2 + half_dt * ( q0*gy - q1*gz + q3*gx);
+    q3_new = q3 + half_dt * ( q0*gz + q1*gy - q2*gx);
 
-    if abs(cp) < 0.05
-        cp = 0.05; % Prevent gimbal lock singularity
+    q_norm = sqrt(q0_new*q0_new + q1_new*q1_new + q2_new*q2_new + q3_new*q3_new);
+    if q_norm > 1e-8
+        inv_q = 1.0 / q_norm;
+        q = [q0_new; q1_new; q2_new; q3_new] * inv_q;
     end
 
-    roll_dot  = gx + (gy * sr + gz * cr) * tp;
-    pitch_dot = gy * cr - gz * sr;
-    yaw_dot   = (gy * sr + gz * cr) / cp;
+    q0 = q(1); q1 = q(2); q2 = q(3); q3 = q(4);
 
-    % 3. Complementary Filter Fusion
-    % Alpha factor: 0.995 gives high weight to low-noise gyro at 1 kHz,
-    % while continuously correcting drift with gravity reference.
-    alpha = 0.995;
-
-    est_roll  = alpha * (est_roll + roll_dot * dt) + (1.0 - alpha) * acc_roll;
-    est_pitch = alpha * (est_pitch + pitch_dot * dt) + (1.0 - alpha) * acc_pitch;
-    est_yaw   = est_yaw + yaw_dot * dt; % Yaw has no magnetic reference, pure integration
-
-    % Bound angles between -pi and +pi
-    if est_roll > pi
-        est_roll = est_roll - 2.0*pi;
-    elseif est_roll < -pi
-        est_roll = est_roll + 2.0*pi;
-    end
-
-    if est_pitch > pi
-        est_pitch = est_pitch - 2.0*pi;
-    elseif est_pitch < -pi
-        est_pitch = est_pitch + 2.0*pi;
-    end
-
-    roll  = est_roll;
-    pitch = est_pitch;
-    yaw   = est_yaw;
+    % 3. Extract Z-Y-X Euler Angles
+    sin_pitch = max(min(2.0 * (q0*q2 - q3*q1), 1.0), -1.0);
+    roll  = atan2(2.0 * (q0*q1 + q2*q3), 1.0 - 2.0 * (q1*q1 + q2*q2));
+    pitch = asin(sin_pitch);
+    yaw   = atan2(2.0 * (q0*q3 + q1*q2), 1.0 - 2.0 * (q2*q2 + q3*q3));
+    q_out = q;
 end
