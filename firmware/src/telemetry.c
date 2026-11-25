@@ -5,6 +5,7 @@
 #include <string.h>
 
 extern void UART6_SendString(const char *str);
+__attribute__((weak)) void System_Enter_DFU_Bootloader(void) {}
 
 static char    s_cmd_buf[96];
 static uint8_t s_cmd_idx = 0;
@@ -99,6 +100,11 @@ static void Handle_Command_Line(char *line) {
     if (strcmp(line, "$CMD,AI_RESET") == 0) {
         Flight_Controller_Reset_AI();
         UART6_SendString("$ACK,AI_RESET\r\n");
+        return;
+    }
+    if (strcmp(line, "$CMD,BOOTLOADER") == 0 || strcmp(line, "$CMD,DFU") == 0) {
+        UART6_SendString("$ACK,BOOTLOADER\r\n");
+        System_Enter_DFU_Bootloader();
         return;
     }
 

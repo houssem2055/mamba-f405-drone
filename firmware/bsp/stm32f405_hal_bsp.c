@@ -217,3 +217,40 @@ void USART6_IRQHandler(void) {
         Telemetry_Process_Rx_Byte(b);
     }
 }
+
+void System_Enter_DFU_Bootloader(void) {
+    /* Wait for UART6 TX complete so $ACK,BOOTLOADER finishes sending */
+    while (!(USART6->SR & (1UL << 6))) {}
+
+    /* Disable all interrupts */
+    __asm__ volatile ("cpsid i" : : : "memory");
+
+    /* Disable SysTick */
+    SysTick->CTRL = 0UL;
+    SysTick->LOAD = 0UL;
+    SysTick->VAL  = 0UL;
+
+    /* Clear all NVIC enabled & pending interrupts */
+    for (uint32_t i = 0; i < 8; i++) {
+        *(volatile uint32_t *)(uintptr_t)(0xE000E180UL + i * 4U) = 0xFFFFFFFFUL; /* ICER */
+        *(volatile uint32_t *)(uintptr_t)(0xE000E280UL + i * 4U) = 0xFFFFFFFFUL; /* ICPR */
+    }
+
+    /* Reset RCC clocks to default HSI */
+    RCC->CR |= (1UL << 0);     /* HSION */
+    RCC->CFGR = 0UL;
+    RCC->CR &= ~((1UL << 24) | (1UL << 16)); /* PLLOFF, HSEOFF */
+
+    /* Enable SYSCFG clock and remap System Memory (0x1FFF0000) to 0x00000000 */
+    RCC->APB2ENR |= (1UL << 14);
+    *(volatile uint32_t *)0x40013800UL = 0x01UL; /* SYSCFG->MEMRMP = 0x01 */
+
+    /* Set Main Stack Pointer and jump to STM32F405 ROM DFU Bootloader */
+    uint32_t boot_msp   = *(volatile uint32_t *)0x1FFF0000UL;
+    uint32_t boot_reset = *(volatile uint32_t *)0x1FFF0004UL;
+    __asm__ volatile ("msr msp, %0" : : "r" (boot_msp) : "memory");
+    __asm__ volatile ("cpsie i" : : : "memory");
+    ((void (*)(void))(uintptr_t)boot_reset)();
+
+    while (1) {}
+}

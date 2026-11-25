@@ -4,9 +4,11 @@ cmake-build-*/
 *.elf
 *.bin
 *.hex
+*.exe
 *.o
 *.d
 *.map
+tools/dfu-util/
 
 # MATLAB / Simulink temporary & codegen outputs
 matlab/codegen/

@@ -90,6 +90,9 @@ int main(void) {
     uint32_t blackbox_counter  = 0;
     uint32_t led_counter       = 0;
     bool     led_state         = false;
+#ifdef BENCH_TEST_NO_RC
+    uint32_t bench_start_ms    = s_system_ticks_ms;
+#endif
 
     /* ====================================================================== */
     /*               DETERMINISTIC 1 kHz MAIN FLIGHT LOOP                     */
@@ -125,6 +128,62 @@ int main(void) {
         /* 4. Read Battery Voltage for Sag Compensation */
         float vbat = ADC_Read_Vbat_Volts();
 
+#ifdef BENCH_TEST_NO_RC
+        /* TEMPORARY BENCH TEST MODE (PROPS MUST BE REMOVED!)
+         * 0 - 3.0s   : Wait (Disarmed 1000 us)
+         * 3.0 - 4.5s : Motor 1 spin (1120 us)
+         * 4.5 - 6.0s : Motor 2 spin (1120 us)
+         * 6.0 - 7.5s : Motor 3 spin (1120 us)
+         * 7.5 - 9.0s : Motor 4 spin (1120 us)
+         * 9.0 - 10.0s: Pause (1000 us)
+         * 10.0 - 16.0s: Closed-Loop Filter + PID test (8% throttle, capped at 1300 us)
+         * > 16.0s    : Auto-Disarm
+         */
+        uint32_t elapsed = now_ms - bench_start_ms;
+        s_rc.failsafe = false;
+        s_rc.flight_mode = 1; /* Angle Mode */
+        s_rc.airmode = false;
+        s_rc.roll_cmd = 0.0f;
+        s_rc.pitch_cmd = 0.0f;
+        s_rc.yaw_cmd = 0.0f;
+
+        if (elapsed >= 10000U && elapsed < 16000U) {
+            s_is_armed = true;
+            s_rc.arm_switch = true;
+            s_rc.throttle = 0.08f;
+            Flight_Controller_Update(
+                &s_rc, &s_imu, true, false, vbat, LOOP_DT, &s_motors, &s_attitude
+            );
+            /* Cap bench test output at 1300 us for safety */
+            if (s_motors.m1 > 1300.0f) s_motors.m1 = 1300.0f;
+            if (s_motors.m2 > 1300.0f) s_motors.m2 = 1300.0f;
+            if (s_motors.m3 > 1300.0f) s_motors.m3 = 1300.0f;
+            if (s_motors.m4 > 1300.0f) s_motors.m4 = 1300.0f;
+            Motors_Set_All_Pwm(&s_motors);
+        } else {
+            s_is_armed = false;
+            s_rc.arm_switch = false;
+            s_rc.throttle = 0.0f;
+            Flight_Controller_Update(
+                &s_rc, &s_imu, false, false, vbat, LOOP_DT, &s_motors, &s_attitude
+            );
+            if (elapsed >= 3000U && elapsed < 4500U) {
+                s_motors.m1 = 1120.0f; s_motors.m2 = 1000.0f; s_motors.m3 = 1000.0f; s_motors.m4 = 1000.0f;
+                Motors_Set_All_Pwm(&s_motors);
+            } else if (elapsed >= 4500U && elapsed < 6000U) {
+                s_motors.m1 = 1000.0f; s_motors.m2 = 1120.0f; s_motors.m3 = 1000.0f; s_motors.m4 = 1000.0f;
+                Motors_Set_All_Pwm(&s_motors);
+            } else if (elapsed >= 6000U && elapsed < 7500U) {
+                s_motors.m1 = 1000.0f; s_motors.m2 = 1000.0f; s_motors.m3 = 1120.0f; s_motors.m4 = 1000.0f;
+                Motors_Set_All_Pwm(&s_motors);
+            } else if (elapsed >= 7500U && elapsed < 9000U) {
+                s_motors.m1 = 1000.0f; s_motors.m2 = 1000.0f; s_motors.m3 = 1000.0f; s_motors.m4 = 1120.0f;
+                Motors_Set_All_Pwm(&s_motors);
+            } else {
+                Motors_Disarm();
+            }
+        }
+#else
         /* 5. Execute Flight Control Stack (Filters -> Mahony -> P-PID -> Airmode Mixer) */
         Flight_Controller_Update(
             &s_rc,
@@ -143,6 +202,7 @@ int main(void) {
         } else {
             Motors_Disarm();
         }
+#endif
 
         /* 6.5 Real-Time TinyML Anomaly & Fault Classifier (100 Hz inference inside 1 kHz buffer) */
         AI_Fault_Detector_Update(

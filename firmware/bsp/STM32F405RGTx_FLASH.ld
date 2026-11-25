@@ -46,5 +46,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4);
         _ebss = .;
+        PROVIDE(end = .);
+        PROVIDE(_end = .);
     } > RAM
 }
