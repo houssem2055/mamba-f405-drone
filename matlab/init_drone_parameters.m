@@ -19,15 +19,15 @@ drone.Iyy = 4.85e-3;
 drone.Izz = 8.80e-3;
 drone.J   = diag([drone.Ixx, drone.Iyy, drone.Izz]);
 
-% Aerodynamic Coefficients
-drone.kt = 1.35e-5;              % Thrust coefficient (N / (rad/s)^2)
-drone.km = 2.10e-7;              % Drag torque coefficient (N*m / (rad/s)^2)
+% Aerodynamic Coefficients (5-inch prop on 4S LiPo)
+drone.kt = 1.15e-6;              % Thrust coefficient (N / (rad/s)^2) (~5.5N max per motor)
+drone.km = 1.90e-8;              % Drag torque coefficient (N*m / (rad/s)^2)
 drone.cq = drone.km / drone.kt;  % Torque-to-thrust ratio
 
 % Motor / ESC Characteristics
 drone.motor_tau   = 0.020;       % First-order motor response time constant (seconds)
 drone.pwm_min     = 1000;        % Minimum PWM pulse width (microseconds)
-drone.pwm_idle    = 1070;        % Idle spinning PWM (disarmed/idle)
+drone.pwm_idle    = 1060;        % Idle spinning PWM (armed idle)
 drone.pwm_max     = 2000;        % Maximum PWM pulse width (microseconds)
 drone.omega_idle  = 200.0;       % Idle rotor angular velocity (rad/s)
 drone.omega_max   = 2200.0;      % Max rotor angular velocity at 2000us (rad/s)
@@ -40,32 +40,32 @@ control.Ts   = 1.0 / control.fs; % Sample time = 0.001 s (1 ms)
 
 % --- Outer Loop: Angle / Attitude Controller (P-Controller) ---
 % Converts angle error (rad) -> desired angular rate (rad/s)
-control.Kp_angle_roll  = 6.5;
-control.Kp_angle_pitch = 6.5;
+control.Kp_angle_roll  = 6.0;
+control.Kp_angle_pitch = 6.0;
 
 % --- Inner Loop: Angular Rate Controller (PID Controller) ---
 % Roll Rate Loop
-control.Kp_rate_roll  = 0.14;
+control.Kp_rate_roll  = 0.13;
 control.Ki_rate_roll  = 0.05;
-control.Kd_rate_roll  = 0.0035;
+control.Kd_rate_roll  = 0.0012;
 
 % Pitch Rate Loop
-control.Kp_rate_pitch = 0.14;
+control.Kp_rate_pitch = 0.13;
 control.Ki_rate_pitch = 0.05;
-control.Kd_rate_pitch = 0.0035;
+control.Kd_rate_pitch = 0.0012;
 
 % Yaw Rate Loop
-control.Kp_rate_yaw   = 0.25;
-control.Ki_rate_yaw   = 0.12;
+control.Kp_rate_yaw   = 0.50;
+control.Ki_rate_yaw   = 0.20;
 control.Kd_rate_yaw   = 0.0000;
 
 % Anti-windup and actuator limits
-control.max_rate_roll_pitch = 4.0;  % Max allowable angular rate command (rad/s) ~ 230 deg/s
+control.max_rate_roll_pitch = 4.5;  % Max allowable angular rate command (rad/s) ~ 258 deg/s
 control.max_rate_yaw        = 3.5;  % Max yaw rate command (rad/s) ~ 200 deg/s
-control.i_term_limit        = 150.0;% Max integral contribution (PWM units)
+control.i_term_limit        = 120.0;% Max integral contribution (PWM units)
 
 %% 4. Attitude Filter Parameters
-filter.alpha_comp = 0.985;       % Complementary filter gyro weight: angle = alpha*(angle+gyro*dt) + (1-alpha)*accel
+filter.alpha_comp = 0.995;       % Complementary filter gyro weight: angle = alpha*(angle+gyro*dt) + (1-alpha)*accel
 filter.gyro_lpf_cutoff = 80.0;   % Gyro 2nd order low-pass filter cutoff (Hz)
 
 fprintf('Configuration loaded successfully:\n');

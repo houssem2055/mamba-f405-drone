@@ -33,9 +33,11 @@ log_commands  = zeros(4, N);
 % rc_cmd: [throttle (0..1); roll_cmd (rad); pitch_cmd (rad); yaw_rate_cmd (rad/s)]
 rc_commands = zeros(4, N);
 
-% Takeoff hover throttle (~0.45 throttle holds hover)
-hover_thr = (drone.m * drone.g) / (4 * drone.kt * (drone.omega_max * 0.5)^2);
-hover_thr = min(max(hover_thr, 0.35), 0.55);
+% Compute exact hover throttle from physical rotor thrust equation: m*g = 4*kt*omega_hover^2
+omega_hover = sqrt((drone.m * drone.g) / (4.0 * drone.kt));
+pwm_hover   = drone.pwm_min + ((omega_hover - drone.omega_idle) / (drone.omega_max - drone.omega_idle)) * (drone.pwm_max - drone.pwm_min);
+hover_thr   = (pwm_hover - drone.pwm_idle) / (drone.pwm_max - drone.pwm_idle);
+hover_thr   = min(max(hover_thr, 0.25), 0.70);
 
 for k = 1:N
     t = time(k);
@@ -45,14 +47,16 @@ for k = 1:N
     yaw_cmd = 0.0;
     
     if t < 0.5
-        thr = 0.1; % Idle on ground
+        thr = 0.0; % Idle on ground
+    elseif t < 1.5
+        thr = hover_thr + 0.08; % Smooth takeoff climb
     elseif t < 3.0
-        thr = hover_thr; % Takeoff & hover
+        thr = hover_thr; % Stabilize & hover
     elseif t < 5.0
-        thr = hover_thr;
+        thr = hover_thr + 0.01;
         roll_cmd = 0.15; % 8.6 degrees roll step
     elseif t < 7.0
-        thr = hover_thr;
+        thr = hover_thr + 0.01;
         roll_cmd = 0.0;
         pitch_cmd = -0.15; % Forward pitch step
     else
@@ -67,6 +71,7 @@ end
 fprintf('Simulating %d steps (%.1f seconds)...\n', N, t_final);
 armed = uint8(1);
 flight_mode = uint8(1); % Angle Mode
+rotor_omega = ones(4, 1) * drone.omega_idle; % Initial rotor speeds
 
 for k = 1:N
     % Current states
@@ -81,31 +86,32 @@ for k = 1:N
     p = omega(1); q = omega(2); r = omega(3);
     
     % --- Sensor Emulation (MPU6000 on Mamba F405) ---
-    % Accelerometer: senses gravity in body frame + linear acceleration + noise
-    R_IB = [cos(theta)*cos(psi), cos(theta)*sin(psi), -sin(theta);
-            sin(phi)*sin(theta)*cos(psi) - cos(phi)*sin(psi), sin(phi)*sin(theta)*sin(psi) + cos(phi)*cos(psi), sin(phi)*cos(theta);
-            cos(phi)*sin(theta)*cos(psi) + sin(phi)*sin(psi), cos(phi)*sin(theta)*sin(psi) - sin(phi)*cos(psi), cos(phi)*cos(theta)];
+    % True Body-to-Inertial rotation matrix R_B^I (Z-Y-X Euler, matching docs/quadcopter_dynamics.md)
+    R_IB = [cos(theta)*cos(psi), sin(phi)*sin(theta)*cos(psi) - cos(phi)*sin(psi), cos(phi)*sin(theta)*cos(psi) + sin(phi)*sin(psi);
+            cos(theta)*sin(psi), sin(phi)*sin(theta)*sin(psi) + cos(phi)*cos(psi), cos(phi)*sin(theta)*sin(psi) - sin(phi)*cos(psi);
+            -sin(theta),         sin(phi)*cos(theta),                              cos(phi)*cos(theta)];
     R_BI = R_IB';
     
-    % Gravity vector in body frame: R_BI * [0; 0; -g] (NED coordinates)
-    g_body = R_BI * [0; 0; -drone.g];
+    % Gravity reaction vector in body frame (NED: +g along +Z when level)
+    g_body = R_BI * [0; 0; drone.g];
     
     % Add realistic IMU noise
     acc_noise  = 0.08 * randn(3, 1);
     gyro_noise = 0.005 * randn(3, 1);
     
-    accel_meas = -g_body + acc_noise;
+    accel_meas = g_body + acc_noise;
     gyro_meas  = omega + gyro_noise;
     
     % --- Call Embedded Flight Controller ---
     rc_in = rc_commands(:, k);
     [motors_pwm, telem] = flight_controller(rc_in, accel_meas, gyro_meas, armed, flight_mode, dt);
     
-    % --- Actuator Model (PWM -> Rotor Speed -> Thrust & Torques) ---
-    % Map PWM (1000..2000 us) to rotor speed (rad/s)
+    % --- Actuator Model (PWM -> First-Order Motor Lag -> Rotor Speed -> Thrust & Torques) ---
+    % Map PWM (1000..2000 us) to target rotor speed (rad/s)
     pwm_norm = (motors_pwm - drone.pwm_min) / (drone.pwm_max - drone.pwm_min);
     pwm_norm = max(min(pwm_norm, 1.0), 0.0);
-    rotor_omega = drone.omega_idle + pwm_norm * (drone.omega_max - drone.omega_idle);
+    rotor_omega_cmd = drone.omega_idle + pwm_norm * (drone.omega_max - drone.omega_idle);
+    rotor_omega     = rotor_omega + (dt / drone.motor_tau) * (rotor_omega_cmd - rotor_omega);
     
     % Rotor thrusts & drag torques: T = kt * w^2, Q = km * w^2
     thrusts = drone.kt * (rotor_omega .^ 2);

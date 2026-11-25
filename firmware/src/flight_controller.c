@@ -17,12 +17,16 @@ static float s_prev_err_p = 0.0f;
 static float s_prev_err_q = 0.0f;
 static float s_prev_err_r = 0.0f;
 
+static float s_d_roll_f = 0.0f;
+static float s_d_pitch_f = 0.0f;
+static float s_d_yaw_f = 0.0f;
+
 /* Default PID gains (tuned in MATLAB) */
 static PID_Gains_t s_gains = {
     .Kp_angle = 6.0f,
-    .Kp_p = 0.13f, .Ki_p = 0.04f, .Kd_p = 0.0035f,
-    .Kp_q = 0.13f, .Ki_q = 0.04f, .Kd_q = 0.0035f,
-    .Kp_r = 0.22f, .Ki_r = 0.10f, .Kd_r = 0.0000f
+    .Kp_p = 0.13f, .Ki_p = 0.05f, .Kd_p = 0.0012f,
+    .Kp_q = 0.13f, .Ki_q = 0.05f, .Kd_q = 0.0012f,
+    .Kp_r = 0.50f, .Ki_r = 0.20f, .Kd_r = 0.0000f
 };
 
 static inline float Clamp(float val, float min, float max) {
@@ -41,6 +45,9 @@ void Flight_Controller_Init(void) {
     s_prev_err_p = 0.0f;
     s_prev_err_q = 0.0f;
     s_prev_err_r = 0.0f;
+    s_d_roll_f = 0.0f;
+    s_d_pitch_f = 0.0f;
+    s_d_yaw_f = 0.0f;
 }
 
 void Flight_Controller_Update(
@@ -93,6 +100,9 @@ void Flight_Controller_Update(
         s_prev_err_p = 0.0f;
         s_prev_err_q = 0.0f;
         s_prev_err_r = 0.0f;
+        s_d_roll_f = 0.0f;
+        s_d_pitch_f = 0.0f;
+        s_d_yaw_f = 0.0f;
 
         motors_out->m1 = MOTOR_MIN_PWM_US;
         motors_out->m2 = MOTOR_MIN_PWM_US;
@@ -123,24 +133,30 @@ void Flight_Controller_Update(
     float err_r = r_des - imu->gz;
 
     /* Integrators with Anti-Windup */
-    const float max_i = 120.0f;
+    const float pwm_scale = 800.0f;
+    const float max_i = 120.0f / pwm_scale; /* Max integral contribution = 120 us */
     s_i_roll  = Clamp(s_i_roll  + s_gains.Ki_p * err_p * dt, -max_i, max_i);
     s_i_pitch = Clamp(s_i_pitch + s_gains.Ki_q * err_q * dt, -max_i, max_i);
     s_i_yaw   = Clamp(s_i_yaw   + s_gains.Ki_r * err_r * dt, -max_i, max_i);
 
-    /* Derivatives */
-    float d_roll  = s_gains.Kd_p * (err_p - s_prev_err_p) / dt;
-    float d_pitch = s_gains.Kd_q * (err_q - s_prev_err_q) / dt;
-    float d_yaw   = s_gains.Kd_r * (err_r - s_prev_err_r) / dt;
+    /* Derivatives with 1st-order Low-Pass Filter (~28 Hz at 1 kHz) */
+    const float d_lpf_alpha = 0.15f;
+    float d_roll_raw  = s_gains.Kd_p * (err_p - s_prev_err_p) / dt;
+    float d_pitch_raw = s_gains.Kd_q * (err_q - s_prev_err_q) / dt;
+    float d_yaw_raw   = s_gains.Kd_r * (err_r - s_prev_err_r) / dt;
+
+    s_d_roll_f  += d_lpf_alpha * (d_roll_raw  - s_d_roll_f);
+    s_d_pitch_f += d_lpf_alpha * (d_pitch_raw - s_d_pitch_f);
+    s_d_yaw_f   += d_lpf_alpha * (d_yaw_raw   - s_d_yaw_f);
 
     s_prev_err_p = err_p;
     s_prev_err_q = err_q;
     s_prev_err_r = err_r;
 
     /* Total control torque effort (scaled to PWM delta) */
-    float u_roll  = ((s_gains.Kp_p * err_p) + s_i_roll  + d_roll)  * 800.0f;
-    float u_pitch = ((s_gains.Kp_q * err_q) + s_i_pitch + d_pitch) * 800.0f;
-    float u_yaw   = ((s_gains.Kp_r * err_r) + s_i_yaw   + d_yaw)   * 800.0f;
+    float u_roll  = ((s_gains.Kp_p * err_p) + s_i_roll  + s_d_roll_f)  * pwm_scale;
+    float u_pitch = ((s_gains.Kp_q * err_q) + s_i_pitch + s_d_pitch_f) * pwm_scale;
+    float u_yaw   = ((s_gains.Kp_r * err_r) + s_i_yaw   + s_d_yaw_f)   * pwm_scale;
 
     /* 5. Quad-X Motor Mixing */
     float base_thrust = MOTOR_IDLE_PWM_US + rc->throttle * (MOTOR_MAX_PWM_US - MOTOR_IDLE_PWM_US);

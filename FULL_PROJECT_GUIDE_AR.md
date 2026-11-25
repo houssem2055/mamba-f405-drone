@@ -189,26 +189,26 @@ U_4 (\text{M4: Front-Left, CCW}) &= T_0 + \Delta\phi + \Delta\theta - \Delta\psi
    * `drone.arm_len = 0.125`: طول الذراع من مركز ثقل الدرون إلى محور المحرك بالمتر (إطار 250 ملم قطرياً).
    * `drone.d = drone.arm_len / sqrt(2)`: المسافة العمودية على محوري X و Y لكل ذراع بزاوية 45 درجة ($\approx 0.0884\text{ m}$).
    * `drone.Ixx = 4.85e-3`, `drone.Iyy = 4.85e-3`, `drone.Izz = 8.80e-3`: عزوم القصور الذاتي حول المحاور الثلاثة ($\text{kg}\cdot\text{m}^2$)، وتُجمع في المصفوفة القطرية `drone.J = diag([drone.Ixx, drone.Iyy, drone.Izz])`.
-   * `drone.kt = 1.35e-5`: ثابت الدفع للمروحة ($\text{N} / (\text{rad/s})^2$).
-   * `drone.km = 2.10e-7`: ثابت عزم السحب للمروحة ($\text{N}\cdot\text{m} / (\text{rad/s})^2$).
+   * `drone.kt = 1.15e-6`: ثابت الدفع للمروحة ($\text{N} / (\text{rad/s})^2$) — يعطي قرابة `5.5 N` أقصى دفع لكل محرك (نسبة دفع إلى وزن $\approx 3.5:1$).
+   * `drone.km = 1.90e-8`: ثابت عزم السحب للمروحة ($\text{N}\cdot\text{m} / (\text{rad/s})^2$).
    * `drone.cq = drone.km / drone.kt`: نسبة العزم إلى الدفع.
-   * `drone.motor_tau = 0.020`: الثابت الزمني لاستجابة المحرك من الدرجة الأولى (20 ملي ثانية، مُعرّف كمرجع لخصائص المحرك).
-   * `drone.pwm_min = 1000`, `drone.pwm_idle = 1070`, `drone.pwm_max = 2000`: حدود نبضة الـ ESC بالميكروثانية.
+   * `drone.motor_tau = 0.020`: الثابت الزمني لاستجابة المحرك من الدرجة الأولى (20 ملي ثانية).
+   * `drone.pwm_min = 1000`, `drone.pwm_idle = 1060`, `drone.pwm_max = 2000`: حدود نبضة الـ ESC بالميكروثانية.
    * `drone.omega_idle = 200.0`, `drone.omega_max = 2200.0`: السرعة الزاوية للدوار بالراديان/ثانية عند الخمول وأقصى طاقة.
 2. **القسم 2 — التوقيت (`control`)**:
    * `control.fs = 1000.0`: تردد حلقة التحكم (1000 هرتز).
    * `control.Ts = 1.0 / control.fs`: زمن العينة `0.001` ثانية (1 ملي ثانية).
 3. **القسم 3 — معاملات الـ PID (`control`)**:
-   * الحلقة الخارجية: `Kp_angle_roll = 6.5`, `Kp_angle_pitch = 6.5`.
-   * حلقة Roll الداخلية: `Kp_rate_roll = 0.14`, `Ki_rate_roll = 0.05`, `Kd_rate_roll = 0.0035`.
-   * حلقة Pitch الداخلية: `Kp_rate_pitch = 0.14`, `Ki_rate_pitch = 0.05`, `Kd_rate_pitch = 0.0035`.
-   * حلقة Yaw الداخلية: `Kp_rate_yaw = 0.25`, `Ki_rate_yaw = 0.12`, `Kd_rate_yaw = 0.0000`.
-   * حدود الأمان: `max_rate_roll_pitch = 4.0 rad/s`، `max_rate_yaw = 3.5 rad/s`، `i_term_limit = 150.0`.
+   * الحلقة الخارجية: `Kp_angle_roll = 6.0`, `Kp_angle_pitch = 6.0`.
+   * حلقة Roll الداخلية: `Kp_rate_roll = 0.13`, `Ki_rate_roll = 0.05`, `Kd_rate_roll = 0.0012`.
+   * حلقة Pitch الداخلية: `Kp_rate_pitch = 0.13`, `Ki_rate_pitch = 0.05`, `Kd_rate_pitch = 0.0012`.
+   * حلقة Yaw الداخلية: `Kp_rate_yaw = 0.50`, `Ki_rate_yaw = 0.20`, `Kd_rate_yaw = 0.0000`.
+   * حدود الأمان: `max_rate_roll_pitch = 4.5 rad/s` ($\approx 258^\circ/\text{s}$)، `max_rate_yaw = 3.5 rad/s`، `i_term_limit = 120.0`.
 4. **القسم 4 — معاملات الفلتر (`filter`)**:
-   * `filter.alpha_comp = 0.985`, `filter.gyro_lpf_cutoff = 80.0`.
+   * `filter.alpha_comp = 0.995`, `filter.gyro_lpf_cutoff = 80.0`.
 
 > [!IMPORTANT]
-> **ملاحظة تقنية دقيقة**: الدالتان `attitude_estimator.m` و `flight_controller.m` مصممتان لتكونا مستقلتين وقابلتين للتحويل إلى C (`%#codegen`) بدون متغيرات عامة (`global`)؛ لذلك تحتويان داخلياً على ثوابتهما الخاصة (`alpha = 0.995`، `Kp_angle = 6.0`، `Kp_p = 0.13`, `Ki_p = 0.04`, `Kd_p = 0.0035`، `Kp_r = 0.22`, `Ki_r = 0.10`، `IDLE_PWM = 1060.0`، `MAX_I_TERM = 120.0`) وهي مطابقة تماماً للقيم الموجودة في `firmware/src/flight_controller.c`. إذا عدّلت القيم في `init_drone_parameters.m`، يجب تحديثها أيضاً داخل `flight_controller.m` و `firmware/src/flight_controller.c` أو تمريرها كمدخلات.
+> **ملاحظة تقنية**: الدالتان `attitude_estimator.m` و `flight_controller.m` مصممتان لتكونا مستقلتين وقابلتين للتحويل إلى C (`%#codegen`) بدون متغيرات عامة (`global`)؛ لذلك تحتويان داخلياً على نفس هذه الثوابت (`alpha = 0.995`، `Kp_angle = 6.0`، `Kp_p = 0.13`, `Ki_p = 0.05`, `Kd_p = 0.0012`، `Kp_r = 0.50`, `Ki_r = 0.20`، `IDLE_PWM = 1060.0`، `MAX_I_PWM = 120.0`) وهي متطابقة تماماً بين `init_drone_parameters.m` و `flight_controller.m` و `firmware/src/flight_controller.c`.
 
 ---
 
@@ -256,9 +256,9 @@ U_4 (\text{M4: Front-Left, CCW}) &= T_0 + \Delta\phi + \Delta\theta - \Delta\psi
 * `telemetry`: مصفوفة 6 قيم `[est_roll; est_pitch; est_yaw; err_p; err_q; err_r]`.
 
 **التسلسل الداخلي**:
-1. **الذاكرة الداخلية (`persistent`)**: تحفظ متراكمات التكامل (`i_roll`, `i_pitch`, `i_yaw`) والأخطاء السابقة للمشتق (`prev_rate_err_p`, `prev_rate_err_q`, `prev_rate_err_r`).
+1. **الذاكرة الداخلية (`persistent`)**: تحفظ متراكمات التكامل (`i_roll`, `i_pitch`, `i_yaw`) والأخطاء السابقة للمشتق (`prev_rate_err_p`, `prev_rate_err_q`, `prev_rate_err_r`) وحالات المرشح (`d_roll_f`, `d_pitch_f`, `d_yaw_f`).
 2. **تقدير الزاوية**: تستدعي `attitude_estimator` مع تمرير `reset_filter = (armed == 0)`.
-3. **إعادة التصفير الأمني**: إذا كان `armed == 0` أو `throttle_in < 0.05` (الخنق في أدنى مستوى)، تُصفّر كافة متراكمات الـ `I` و `prev_rate_err` فوراً لمنع تراكم الخطأ على الأرض.
+3. **إعادة التصفير الأمني**: إذا كان `armed == 0` أو `throttle_in < 0.05` (الخنق في أدنى مستوى)، تُصفّر كافة متراكمات الـ `I` و `prev_rate_err` ومرشح المشتق فوراً لمنع تراكم الخطأ على الأرض.
 4. **الحلقة الخارجية (Outer Loop)**:
    - إذا كان `flight_mode == 1` (Angle Mode): تقيد زاوية الميلان المطلوبة بحد أقصى `±0.785 rad` ($\pm 45^\circ$)، ثم تحسب السرعة الزاوية المطلوبة:
      - `p_des = Kp_angle * (target_roll - est_roll)`
@@ -268,9 +268,9 @@ U_4 (\text{M4: Front-Left, CCW}) &= T_0 + \Delta\phi + \Delta\theta - \Delta\psi
    - تقيد `p_des` و `q_des` بحد أقصى `±4.5 rad/s` ($\approx 258^\circ/\text{s}$).
 5. **الحلقة الداخلية (Inner Loop Rate PID)**:
    - تحسب أخطاء السرعة: `err_p = p_des - gyro(1)`، `err_q = q_des - gyro(2)`، `err_r = r_des - gyro(3)`.
-   - التكامل مع Anti-Windup: يضيف `Ki * err * dt` ويحصر القيمة بين `[-120.0, +120.0]` فقط عندما يكون `armed == 1` و `throttle_in >= 0.05`.
-   - المشتق: `Kd * (err - prev_err) / dt`.
-   - يجمع المجهود الكلي ويضربه في معامل التحويل إلى PWM (`* 800.0`) للحصول على `u_roll`, `u_pitch`, `u_yaw`.
+   - التكامل مع Anti-Windup: يضيف `Ki * err * dt` ويحصر القيمة قبل الضرب في `PWM_SCALE = 800.0` بحد `MAX_I_TERM = 120.0 / 800.0 = 0.15` (أي مساهمة قصوى `±120 µs`) فقط عندما يكون `armed == 1` و `throttle_in >= 0.05`.
+   - المشتق مع مرشح الترددات المنخفضة (1st-order LPF): يحسب `Kd * (err - prev_err) / dt` ثم يمرره عبر مرشح بمعامل `D_LPF_ALPHA = 0.15` (~28 Hz) لتنعيم ضجيج الجيروسكوب ومنع اهتزاز المحركات.
+   - يجمع المجهود الكلي ويضربه في `PWM_SCALE = 800.0` للحصول على `u_roll`, `u_pitch`, `u_yaw`.
 6. **الخلط والتقييد (Quad-X Mixing)**:
    - تحسب الدفع الأساسي: `base_thrust = 1060 + throttle_in * (2000 - 1060)`.
    - إذا كان `armed == 0`: تعيد `1000` للجميع (`MIN_PWM`).
@@ -284,22 +284,25 @@ U_4 (\text{M4: Front-Left, CCW}) &= T_0 + \Delta\phi + \Delta\theta - \Delta\psi
 **ماذا تفعل بالتفصيل**:
 1. تستدعي `init_drone_parameters` لتحميل خصائص الدرون.
 2. تهيئ متجه الحالة ذي الـ 12 عنصراً (`state`): الموضع `[1:3]`، السرعة الخطية `[4:6]`، زوايا أويلر `[7:9]`، والسرعات الزاوية `[10:12]`.
-3. تحسب `hover_thr` (قوة الخنق التقريبية اللازمة للتحليق المتوازن بموازنة الوزن `m * g`) وتبرمج سيناريو المهمة:
-   - `0.0 - 0.5 s`: خمول على الأرض (`thr = 0.1`).
-   - `0.5 - 3.0 s`: إقلاع وتحليق ثابت (`thr = hover_thr`).
+3. تحسب `omega_hover` و `hover_thr` بدقة من معادلة التوازن `m * g = 4 * kt * omega_hover^2` وتبرمج سيناريو المهمة:
+   - `0.0 - 0.5 s`: خمول على الأرض (`thr = 0.0`).
+   - `0.5 - 1.5 s`: صعود إقلاع سلس (`thr = hover_thr + 0.08`).
+   - `1.5 - 3.0 s`: استقرار وتحليق ثابت (`thr = hover_thr`).
    - `3.0 - 5.0 s`: أمر ميلان جانبي `roll_cmd = 0.15 rad` ($\approx 8.6^\circ$).
    - `5.0 - 7.0 s`: تصفير Roll وإعطاء أمر ميلان للأمام `pitch_cmd = -0.15 rad`.
    - `7.0 - 8.0 s`: أمر دوران أفقي `yaw_cmd = 0.5 rad/s`.
 4. في كل خطوة زمنية ($k = 1 \dots 8001$):
-   - تحسب مصفوفة الدوران $\mathbf{R}_{IB}$ و $\mathbf{R}_{BI}$ لتوليد قراءات تسارع وجيروسكوب افتراضية مع إضافة ضجيج عشوائي واقعي (`acc_noise = 0.08 * randn`, `gyro_noise = 0.005 * randn`).
+   - تحسب مصفوفة الدوران من الجسم إلى الأرض $\mathbf{R}_{IB}$ (Z-Y-X Euler) ومعكوسها $\mathbf{R}_{BI}$ لتوليد قراءات تسارع وجيروسكوب افتراضية مع إضافة ضجيج عشوائي واقعي (`acc_noise = 0.08 * randn`, `gyro_noise = 0.005 * randn`).
    - تستدعي `flight_controller(...)` للحصول على نبضات الـ PWM الأربعة.
-   - تحول نبضات PWM إلى سرعات دوران مراوح `rotor_omega`، ثم إلى قوى دفع `thrusts = kt * w^2` وعزوم `torques = km * w^2`، ومنها تحسب عزوم الجسم الثلاثة $\tau_\phi, \tau_\theta, \tau_\psi$.
+   - تحول نبضات PWM إلى سرعات دوران مراوح مطلوبة `rotor_omega_cmd` ثم تطبق نموذج الاستجابة من الدرجة الأولى للمحرك (`motor_tau = 0.020 s`) لحساب `rotor_omega` الفعلية، ثم تحسب قوى الدفع `thrusts = kt * w^2` وعزوم `torques = km * w^2` وعزوم الجسم الثلاثة $\tau_\phi, \tau_\theta, \tau_\psi$.
    - تحل معادلات أويلر الدورانية `omega_dot = J \ (tau_body - cross(omega, J * omega))`، ومعادلات التحويل الكينماتيكي `euler_dot = W_inv * omega`، وقانون نيوتن مع مقاومة هواء خطية `-0.15 * vel`، وتكاملها بطريقة أويلر الصريحة مع نموذج ملامسة الأرض يمنع اختراق الدرون لسطح `z = 0`.
 5. في النهاية ترسم نافذة بها 4 رسومات بيانية (`subplot(2,2,...)`):
    - مقارنة الزوايا الفعلية بالزوايا المطلوبة.
    - السرعات الزاوية للجيروسكوب.
    - نبضات الـ PWM للمحركات الأربعة.
    - الارتفاع بالمتر (`-log_state(3, :)`).
+
+![نتائج محاكاة الطيران 6-DOF](docs/simulation_results.png)
 
 ---
 
@@ -422,7 +425,7 @@ U_4 (\text{M4: Front-Left, CCW}) &= T_0 + \Delta\phi + \Delta\theta - \Delta\psi
   1. تحسب زوايا التسارع والفلتر التكميلي (`alpha = 0.995f`) وتحدث `attitude_out` بالراديان وبالدرجات (`* 180.0f / PI_F`).
   2. إذا كان `!is_armed || rc->throttle < 0.05f`: تصفر التكامل والمشتق السابق وتضبط المحركات الأربعة على `1000.0f` ثم تعود فوراً (`return`).
   3. في وضع `flight_mode == 1` (Angle): تضرب أوامر الريموت في `0.785 rad` ($45^\circ$) وتحول خطأ الزاوية عبر `Kp_angle = 6.0f` إلى `p_des, q_des`، و `r_des = rc->yaw_cmd * 3.5f`. وفي وضع Acro (`0`) تضرب مباشرة في `4.5f` للـ Roll/Pitch و `3.5f` للـ Yaw.
-  4. تحسب الـ Rate PID بالمعاملات الافتراضية (`s_gains`: Roll/Pitch `0.13 / 0.04 / 0.0035`، Yaw `0.22 / 0.10 / 0.0`) مع Anti-Windup (`[-120, 120]`) وضرب في `800.0f`.
+  4. تحسب الـ Rate PID بالمعاملات الافتراضية (`s_gains`: Roll/Pitch `0.13 / 0.05 / 0.0012`، Yaw `0.50 / 0.20 / 0.0`) مع Anti-Windup (`±120 µs / 800.0`) ومرشح D-term (`d_lpf_alpha = 0.15`) وضرب في `800.0f`.
   5. تحسب `base_thrust` وتطبق معادلات خلط Quad-X مع حصر كل مخرج في `[1060.0f, 2000.0f]`.
 
 ---

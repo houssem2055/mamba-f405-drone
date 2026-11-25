@@ -60,6 +60,8 @@ C:\Users\djall\Desktop\drone\
    * **Individual Motor ESC Outputs** ($M_1, M_2, M_3, M_4$).
    * **Altitude response**.
 
+![6-DOF Simulation Results](docs/simulation_results.png)
+
 ---
 
 ### 2. Tuning PID Controller Gains in MATLAB

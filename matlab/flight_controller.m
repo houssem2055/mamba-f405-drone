@@ -16,7 +16,7 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
 %   telemetry:   [roll; pitch; yaw; p_err; q_err; r_err] for logging/ground station
 
     %% 1. Persistent Controller States (Integrals & Derivatives)
-    persistent i_roll i_pitch i_yaw prev_rate_err_p prev_rate_err_q prev_rate_err_r;
+    persistent i_roll i_pitch i_yaw prev_rate_err_p prev_rate_err_q prev_rate_err_r d_roll_f d_pitch_f d_yaw_f;
     if isempty(i_roll)
         i_roll = 0.0;
         i_pitch = 0.0;
@@ -24,6 +24,9 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
         prev_rate_err_p = 0.0;
         prev_rate_err_q = 0.0;
         prev_rate_err_r = 0.0;
+        d_roll_f = 0.0;
+        d_pitch_f = 0.0;
+        d_yaw_f = 0.0;
     end
 
     %% 2. Controller Tuning Parameters
@@ -33,24 +36,27 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
     % Rate (Inner) Loop PID Gains
     % Roll
     Kp_p = 0.13;
-    Ki_p = 0.04;
-    Kd_p = 0.0035;
+    Ki_p = 0.05;
+    Kd_p = 0.0012;
 
     % Pitch
     Kp_q = 0.13;
-    Ki_q = 0.04;
-    Kd_q = 0.0035;
+    Ki_q = 0.05;
+    Kd_q = 0.0012;
 
     % Yaw
-    Kp_r = 0.22;
-    Ki_r = 0.10;
+    Kp_r = 0.50;
+    Ki_r = 0.20;
     Kd_r = 0.0000;
 
     % Safety & Actuator Limits
-    MAX_I_TERM = 120.0;      % Limit integral windup
-    MIN_PWM    = 1000.0;     % ESC idle/off
-    IDLE_PWM   = 1060.0;     % ESC active idle
-    MAX_PWM    = 2000.0;     % Full throttle
+    PWM_SCALE  = 800.0;
+    MAX_I_PWM  = 120.0;                  % Max integral contribution in PWM us
+    MAX_I_TERM = MAX_I_PWM / PWM_SCALE;  % Pre-scale anti-windup limit
+    D_LPF_ALPHA = 0.15;                  % 1st-order D-term low-pass filter (~28 Hz at 1 kHz)
+    MIN_PWM    = 1000.0;                 % ESC idle/off
+    IDLE_PWM   = 1060.0;                 % ESC active idle
+    MAX_PWM    = 2000.0;                 % Full throttle
 
     %% 3. Estimate Current Attitude
     reset_filter = (armed == 0);
@@ -69,6 +75,9 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
         prev_rate_err_p = 0.0;
         prev_rate_err_q = 0.0;
         prev_rate_err_r = 0.0;
+        d_roll_f = 0.0;
+        d_pitch_f = 0.0;
+        d_yaw_f = 0.0;
     end
 
     %% 4. Outer Loop: Attitude Angle -> Desired Angular Rates
@@ -110,24 +119,28 @@ function [motors_pwm, telemetry] = flight_controller(rc_cmd, accel, gyro, armed,
         i_yaw   = max(min(i_yaw   + Ki_r * err_r * dt, MAX_I_TERM), -MAX_I_TERM);
     end
 
-    % Derivative Term (on error or rate measurement)
-    d_roll  = Kd_p * (err_p - prev_rate_err_p) / dt;
-    d_pitch = Kd_q * (err_q - prev_rate_err_q) / dt;
-    d_yaw   = Kd_r * (err_r - prev_rate_err_r) / dt;
+    % Derivative Term with 1st-order Low-Pass Filter (suppresses high-freq gyro noise)
+    d_roll_raw  = Kd_p * (err_p - prev_rate_err_p) / dt;
+    d_pitch_raw = Kd_q * (err_q - prev_rate_err_q) / dt;
+    d_yaw_raw   = Kd_r * (err_r - prev_rate_err_r) / dt;
+
+    d_roll_f  = d_roll_f  + D_LPF_ALPHA * (d_roll_raw  - d_roll_f);
+    d_pitch_f = d_pitch_f + D_LPF_ALPHA * (d_pitch_raw - d_pitch_f);
+    d_yaw_f   = d_yaw_f   + D_LPF_ALPHA * (d_yaw_raw   - d_yaw_f);
 
     prev_rate_err_p = err_p;
     prev_rate_err_q = err_q;
     prev_rate_err_r = err_r;
 
     % Total Control Torques (in PWM scale)
-    u_roll  = (Kp_p * err_p) + i_roll  + d_roll;
-    u_pitch = (Kp_q * err_q) + i_pitch + d_pitch;
-    u_yaw   = (Kp_r * err_r) + i_yaw   + d_yaw;
+    u_roll  = (Kp_p * err_p) + i_roll  + d_roll_f;
+    u_pitch = (Kp_q * err_q) + i_pitch + d_pitch_f;
+    u_yaw   = (Kp_r * err_r) + i_yaw   + d_yaw_f;
 
     % Scale control efforts to motor PWM delta (scale factor = 800 us)
-    u_roll  = u_roll  * 800.0;
-    u_pitch = u_pitch * 800.0;
-    u_yaw   = u_yaw   * 800.0;
+    u_roll  = u_roll  * PWM_SCALE;
+    u_pitch = u_pitch * PWM_SCALE;
+    u_yaw   = u_yaw   * PWM_SCALE;
 
     %% 6. Quad-X Motor Mixing
     % Base throttle maps 0.0 -> IDLE_PWM, 1.0 -> MAX_PWM
