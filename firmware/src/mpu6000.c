@@ -23,15 +23,33 @@ static void MPU_WriteReg(uint8_t reg, uint8_t val) {
     SPI1_Select(false);
 }
 
+static bool s_is_icm42688 = false;
+
 bool MPU6000_Init(void) {
-    /* 1. Reset device */
+    /* 1. Check Device ID (WHO_AM_I) first before resetting */
+    uint8_t who_am_i = MPU_ReadReg(MPU_REG_WHO_AM_I);
+
+    if (who_am_i == 0x47U) {
+        /* InvenSense ICM-42688-P detected! */
+        s_is_icm42688 = true;
+        MPU_WriteReg(0x11, 0x01); /* DEVICE_CONFIG: Soft Reset */
+        Delay_Ms(10);
+        MPU_WriteReg(0x4E, 0x0F); /* PWR_MGMT0: Gyro LN + Accel LN mode */
+        Delay_Ms(60);             /* Wait >45ms gyro startup time so spinup spikes don't corrupt calibration */
+        MPU_WriteReg(0x4F, 0x06); /* GYRO_CONFIG0: +/- 2000 deg/s, 1 kHz ODR */
+        MPU_WriteReg(0x50, 0x26); /* ACCEL_CONFIG0: +/- 8g, 1 kHz ODR */
+        Delay_Ms(20);
+        return true;
+    }
+
+    s_is_icm42688 = false;
+    /* MPU6000 reset & init */
     MPU_WriteReg(MPU_REG_PWR_MGMT_1, 0x80);
     Delay_Ms(100);
 
-    /* 2. Check Device ID (WHO_AM_I) */
-    uint8_t who_am_i = MPU_ReadReg(MPU_REG_WHO_AM_I);
+    who_am_i = MPU_ReadReg(MPU_REG_WHO_AM_I);
     if (who_am_i != MPU6000_WHO_AM_I_VAL) {
-        return false; /* Failed to detect MPU6000 */
+        return false; /* Failed to detect MPU6000 or ICM42688-P */
     }
 
     /* 3. Wake up device, select Auto PLL clock source (Gyro X reference) */
@@ -59,6 +77,12 @@ bool MPU6000_Init(void) {
 bool MPU6000_Calibrate_Gyro(MPU6000_Data_t *imu, uint16_t sample_count) {
     if (!imu || sample_count == 0) return false;
 
+    /* Disable old bias subtraction so re-calibration measures raw zero-rate offset */
+    imu->is_calibrated = false;
+    imu->gx_bias = 0.0f;
+    imu->gy_bias = 0.0f;
+    imu->gz_bias = 0.0f;
+
     float sum_gx = 0.0f, sum_gy = 0.0f, sum_gz = 0.0f;
     for (uint16_t i = 0; i < sample_count; i++) {
         if (!MPU6000_Read_All(imu)) {
@@ -80,22 +104,42 @@ bool MPU6000_Calibrate_Gyro(MPU6000_Data_t *imu, uint16_t sample_count) {
 bool MPU6000_Read_All(MPU6000_Data_t *imu) {
     if (!imu) return false;
 
-    uint8_t tx_buf[15] = {0};
-    uint8_t rx_buf[15] = {0};
-    tx_buf[0] = MPU_REG_ACCEL_XOUT_H | SPI_READ_FLAG;
+    int16_t raw_ax, raw_ay, raw_az, raw_tp = 0, raw_gx, raw_gy, raw_gz;
 
-    SPI1_Select(true);
-    SPI1_TransferBuffer(tx_buf, rx_buf, 15);
-    SPI1_Select(false);
+    if (s_is_icm42688) {
+        /* ICM42688-P: 0x1F..0x2A (12 bytes: AX, AY, AZ, GX, GY, GZ, Big-Endian) */
+        uint8_t tx_buf[13] = {0};
+        uint8_t rx_buf[13] = {0};
+        tx_buf[0] = 0x1F | SPI_READ_FLAG;
 
-    /* Extract 16-bit raw signed values (Big Endian) */
-    int16_t raw_ax = (int16_t)((rx_buf[1]  << 8) | rx_buf[2]);
-    int16_t raw_ay = (int16_t)((rx_buf[3]  << 8) | rx_buf[4]);
-    int16_t raw_az = (int16_t)((rx_buf[5]  << 8) | rx_buf[6]);
-    int16_t raw_tp = (int16_t)((rx_buf[7]  << 8) | rx_buf[8]);
-    int16_t raw_gx = (int16_t)((rx_buf[9]  << 8) | rx_buf[10]);
-    int16_t raw_gy = (int16_t)((rx_buf[11] << 8) | rx_buf[12]);
-    int16_t raw_gz = (int16_t)((rx_buf[13] << 8) | rx_buf[14]);
+        SPI1_Select(true);
+        SPI1_TransferBuffer(tx_buf, rx_buf, 13);
+        SPI1_Select(false);
+
+        raw_ax = (int16_t)((rx_buf[1]  << 8) | rx_buf[2]);
+        raw_ay = (int16_t)((rx_buf[3]  << 8) | rx_buf[4]);
+        raw_az = (int16_t)((rx_buf[5]  << 8) | rx_buf[6]);
+        raw_gx = (int16_t)((rx_buf[7]  << 8) | rx_buf[8]);
+        raw_gy = (int16_t)((rx_buf[9]  << 8) | rx_buf[10]);
+        raw_gz = (int16_t)((rx_buf[11] << 8) | rx_buf[12]);
+    } else {
+        uint8_t tx_buf[15] = {0};
+        uint8_t rx_buf[15] = {0};
+        tx_buf[0] = MPU_REG_ACCEL_XOUT_H | SPI_READ_FLAG;
+
+        SPI1_Select(true);
+        SPI1_TransferBuffer(tx_buf, rx_buf, 15);
+        SPI1_Select(false);
+
+        /* Extract 16-bit raw signed values (Big Endian) */
+        raw_ax = (int16_t)((rx_buf[1]  << 8) | rx_buf[2]);
+        raw_ay = (int16_t)((rx_buf[3]  << 8) | rx_buf[4]);
+        raw_az = (int16_t)((rx_buf[5]  << 8) | rx_buf[6]);
+        raw_tp = (int16_t)((rx_buf[7]  << 8) | rx_buf[8]);
+        raw_gx = (int16_t)((rx_buf[9]  << 8) | rx_buf[10]);
+        raw_gy = (int16_t)((rx_buf[11] << 8) | rx_buf[12]);
+        raw_gz = (int16_t)((rx_buf[13] << 8) | rx_buf[14]);
+    }
 
     /* Convert to physical units */
     imu->ax = (float)raw_ax * ACCEL_SCALE_M_S2;

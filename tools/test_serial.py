@@ -47,6 +47,8 @@ def main():
 
     try:
         ser = serial.Serial(port, baud, timeout=1.0)
+        ser.dtr = True
+        ser.rts = True
         ser.reset_input_buffer()
         ser.write(b"$CMD,PING\n")
         ser.write(b"$CMD,GET_PID\n")

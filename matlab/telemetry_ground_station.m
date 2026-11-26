@@ -24,6 +24,11 @@ else
     port_name = available_ports(1);
     fprintf('[INFO] Connecting to %s at %d baud...\n', port_name, baud_rate);
     s = serialport(port_name, baud_rate, 'Timeout', 2);
+    try
+        setDTR(s, true);
+        setRTS(s, true);
+    catch
+    end
     flush(s);
 end
 

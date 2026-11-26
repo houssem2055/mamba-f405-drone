@@ -1,6 +1,6 @@
 %% run_verification.m
 % Automated verification script for MATLAB simulation & algorithms
-clear; clc;
+clear; clear functions; clc;
 fprintf('====================================================\n');
 fprintf('  Running MATLAB Quadcopter Model Verification      \n');
 fprintf('====================================================\n');

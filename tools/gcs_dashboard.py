@@ -145,6 +145,8 @@ class GCSApp:
         port = self.port_var.get()
         try:
             self.ser = serial.Serial(port, 115200, timeout=0.1)
+            self.ser.dtr = True
+            self.ser.rts = True
             self.conn_btn.config(text="Disconnect")
             self.status_lbl.config(text=f"CONNECTED ({port})", fg="#a6e3a1")
             threading.Thread(target=self._serial_reader, daemon=True).start()

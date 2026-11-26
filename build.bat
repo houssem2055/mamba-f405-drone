@@ -26,6 +26,10 @@ gcc -Wall -Wextra -Werror -O2 -Ifirmware/inc ^
     firmware/src/telemetry.c ^
     firmware/src/blackbox.c ^
     firmware/src/mpu6000.c ^
+    firmware/src/safety_monitor.c ^
+    firmware/src/rth_failsafe.c ^
+    firmware/src/alt_hold.c ^
+    firmware/src/gps_nav.c ^
     tests/test_firmware.c ^
     -o tests/test_firmware.exe -lm
 if %ERRORLEVEL% NEQ 0 (

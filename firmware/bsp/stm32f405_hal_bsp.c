@@ -127,18 +127,53 @@ void System_Hardware_Init(void) {
     USART6->CR1 = (1UL << 13) | (1UL << 5) | (1UL << 3) | (1UL << 2); /* UE, RXNEIE, TE, RE */
     NVIC->ISER[71U >> 5U] = (1UL << (71U & 31U));       /* Enable USART6 IRQ */
 
-    /* ADC1 on PC0 (Channel 10) for V_BAT sense */
+    /* IMU PA4 CS candidate (for ICM-42688-P variants) */
+    GPIO_SetOutput(GPIOA, 4U);
+    GPIOA->BSRR = (1UL << 4U);
+
+    /* ADC1 on PC0 (Ch 10), PC1 (Ch 11) & PC3 (Ch 13) for auto-detected V_BAT sense */
     RCC->APB2ENR |= (1UL << 8);
-    GPIOC->MODER |= (3UL << (VBAT_ADC_PIN * 2U)); /* Analog mode */
+    GPIOC->MODER |= (3UL << (VBAT_ADC_PIN * 2U)) | (3UL << (CURR_ADC_PIN * 2U)) | (3UL << (3U * 2U)); /* Analog mode */
+    ADC1->SMPR1 |= (4UL << 0) | (4UL << 3) | (4UL << 9); /* 84-cycle sample time on Ch 10, 11, 13 */
     ADC1->SQR3 = 10UL;
     ADC1->CR2  = (1UL << 0); /* ADON */
 }
 
+static uint8_t s_imu_cs_pin_bsp = 0U; /* 0 = unprobed, 4 = PA4, 2 = PC2 */
+extern uint8_t SPI1_TransferByte(uint8_t byte);
+
+static void BSP_AutoDetect_IMU_CS(void) {
+    /* Probe PA4 first (ICM-42688-P = 0x47, MPU6000 = 0x68) */
+    GPIOA->BSRR = (1UL << (4U + 16U));
+    (void)SPI1_TransferByte(0x75U | 0x80U);
+    uint8_t id_pa4 = SPI1_TransferByte(0x00U);
+    GPIOA->BSRR = (1UL << 4U);
+
+    if (id_pa4 == 0x47U || id_pa4 == 0x68U) {
+        s_imu_cs_pin_bsp = 4U;
+        return;
+    }
+
+    /* Fallback to PC2 */
+    s_imu_cs_pin_bsp = 2U;
+}
+
 void SPI1_Select(bool select) {
-    if (select) {
-        GPIOC->BSRR = (1UL << (MPU_CS_PIN + 16U)); /* Reset LOW */
+    if (s_imu_cs_pin_bsp == 0U) {
+        BSP_AutoDetect_IMU_CS();
+    }
+    if (s_imu_cs_pin_bsp == 4U) {
+        if (select) {
+            GPIOA->BSRR = (1UL << (4U + 16U)); /* PA4 LOW */
+        } else {
+            GPIOA->BSRR = (1UL << 4U);         /* PA4 HIGH */
+        }
     } else {
-        GPIOC->BSRR = (1UL << MPU_CS_PIN);         /* Set HIGH */
+        if (select) {
+            GPIOC->BSRR = (1UL << (MPU_CS_PIN + 16U)); /* Reset LOW */
+        } else {
+            GPIOC->BSRR = (1UL << MPU_CS_PIN);         /* Set HIGH */
+        }
     }
 }
 
@@ -186,10 +221,48 @@ void UART6_SendString(const char *str) {
     }
 }
 
-float ADC_Read_Vbat_Volts(void) {
+static uint32_t ADC_Read_Channel(uint32_t ch) {
+    ADC1->SQR3 = ch;
     ADC1->CR2 |= (1UL << 30); /* SWSTART */
     while (!(ADC1->SR & (1UL << 1))) {} /* EOC */
-    uint32_t raw = ADC1->DR & 0xFFFU;
+    (void)ADC1->DR;
+    /* Second read after channel mux settles high-impedance voltage divider */
+    ADC1->CR2 |= (1UL << 30); /* SWSTART */
+    while (!(ADC1->SR & (1UL << 1))) {} /* EOC */
+    return ADC1->DR & 0xFFFU;
+}
+
+float ADC_Read_Vbat_Volts(void) {
+    static uint8_t s_vbat_ch = 0U; /* 0 = auto-detect, 10 = PC0, 11 = PC1, 13 = PC3 */
+    uint32_t raw;
+
+    if (s_vbat_ch == 0U) {
+        uint32_t raw_c1 = ADC_Read_Channel(11UL);
+        uint32_t raw_c0 = ADC_Read_Channel(10UL);
+        uint32_t raw_c3 = ADC_Read_Channel(13UL);
+        if (raw_c1 >= 250U && raw_c0 < 150U && raw_c3 < 150U) {
+            s_vbat_ch = 11U;
+            raw = raw_c1;
+        } else if (raw_c0 >= 250U && raw_c1 < 150U && raw_c3 < 150U) {
+            s_vbat_ch = 10U;
+            raw = raw_c0;
+        } else if (raw_c3 >= 250U && raw_c1 < 150U && raw_c0 < 150U) {
+            s_vbat_ch = 13U;
+            raw = raw_c3;
+        } else if (s_imu_cs_pin_bsp == 4U && raw_c3 >= 250U) {
+            s_vbat_ch = 13U;
+            raw = raw_c3;
+        } else if (s_imu_cs_pin_bsp == 4U && raw_c1 >= 250U) {
+            s_vbat_ch = 11U;
+            raw = raw_c1;
+        } else {
+            raw = (raw_c3 > raw_c1) ? raw_c3 : raw_c1;
+            if (raw_c0 > raw) raw = raw_c0;
+        }
+    } else {
+        raw = ADC_Read_Channel((uint32_t)s_vbat_ch);
+    }
+
     /* 11:1 voltage divider on MAMBA F405 Vbat pin */
     return ((float)raw / 4095.0f) * 3.3f * 11.0f;
 }

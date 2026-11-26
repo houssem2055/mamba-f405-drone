@@ -15,6 +15,47 @@ void Telemetry_Init(void) {
     memset(s_cmd_buf, 0, sizeof(s_cmd_buf));
 }
 
+static void Fmt_Float(char *dst, size_t dst_sz, float val, uint8_t decimals) {
+    if (!dst || dst_sz == 0U) return;
+    if (val != val) {
+        snprintf(dst, dst_sz, "0");
+        return;
+    }
+    if (val > 1000000.0f) {
+        snprintf(dst, dst_sz, "999999");
+        return;
+    }
+    if (val < -1000000.0f) {
+        snprintf(dst, dst_sz, "-999999");
+        return;
+    }
+
+    static const uint32_t pow10_tbl[6] = {1UL, 10UL, 100UL, 1000UL, 10000UL, 100000UL};
+    if (decimals > 5U) decimals = 5U;
+    uint32_t scale = pow10_tbl[decimals];
+
+    bool neg = (val < 0.0f);
+    double abs_v = neg ? -(double)val : (double)val;
+    uint64_t scaled = (uint64_t)(abs_v * (double)scale + 0.5);
+    if (scaled == 0ULL) {
+        neg = false;
+    }
+
+    unsigned int whole = (unsigned int)(scaled / scale);
+    unsigned int frac  = (unsigned int)(scaled % scale);
+    if (whole > 9999999U) whole = 9999999U;
+    if (frac  >= 100000U) frac  = 99999U;
+
+    switch (decimals) {
+        case 0U: snprintf(dst, dst_sz, "%s%u",      neg ? "-" : "", whole);       break;
+        case 1U: snprintf(dst, dst_sz, "%s%u.%01u", neg ? "-" : "", whole, frac); break;
+        case 2U: snprintf(dst, dst_sz, "%s%u.%02u", neg ? "-" : "", whole, frac); break;
+        case 3U: snprintf(dst, dst_sz, "%s%u.%03u", neg ? "-" : "", whole, frac); break;
+        case 4U: snprintf(dst, dst_sz, "%s%u.%04u", neg ? "-" : "", whole, frac); break;
+        default: snprintf(dst, dst_sz, "%s%u.%05u", neg ? "-" : "", whole, frac); break;
+    }
+}
+
 void Telemetry_Send_Frame(
     const Attitude_t *att,
     const Motor_Outputs_t *motors,
@@ -24,14 +65,26 @@ void Telemetry_Send_Frame(
 ) {
     if (!att || !motors) return;
 
-    char buffer[160];
+    char f_r[20], f_p[20], f_y[20], f_gx[20], f_gy[20], f_gz[20];
+    char f_m1[20], f_m2[20], f_m3[20], f_m4[20], f_vb[20];
+    Fmt_Float(f_r,  sizeof(f_r),  att->roll_deg, 2U);
+    Fmt_Float(f_p,  sizeof(f_p),  att->pitch_deg, 2U);
+    Fmt_Float(f_y,  sizeof(f_y),  att->yaw_deg, 2U);
+    Fmt_Float(f_gx, sizeof(f_gx), att->gx_filt, 3U);
+    Fmt_Float(f_gy, sizeof(f_gy), att->gy_filt, 3U);
+    Fmt_Float(f_gz, sizeof(f_gz), att->gz_filt, 3U);
+    Fmt_Float(f_m1, sizeof(f_m1), motors->m1, 0U);
+    Fmt_Float(f_m2, sizeof(f_m2), motors->m2, 0U);
+    Fmt_Float(f_m3, sizeof(f_m3), motors->m3, 0U);
+    Fmt_Float(f_m4, sizeof(f_m4), motors->m4, 0U);
+    Fmt_Float(f_vb, sizeof(f_vb), vbat, 2U);
+
+    char buffer[320];
     /* Format: $TLM,roll,pitch,yaw,gx,gy,gz,m1,m2,m3,m4,vbat,armed,mode\r\n */
     int len = snprintf(buffer, sizeof(buffer),
-        "$TLM,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.0f,%.0f,%.0f,%.0f,%.2f,%u,%u\r\n",
-        att->roll_deg, att->pitch_deg, att->yaw_deg,
-        att->gx_filt, att->gy_filt, att->gz_filt,
-        motors->m1, motors->m2, motors->m3, motors->m4,
-        vbat, armed ? 1U : 0U, (unsigned int)mode
+        "$TLM,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%u,%u\r\n",
+        f_r, f_p, f_y, f_gx, f_gy, f_gz, f_m1, f_m2, f_m3, f_m4, f_vb,
+        armed ? 1U : 0U, (unsigned int)mode
     );
 
     if (len > 0) {
@@ -42,17 +95,41 @@ void Telemetry_Send_Frame(
 void Telemetry_Send_AI_Frame(const Attitude_t *att, const AI_Diagnostics_t *ai) {
     if (!att || !ai) return;
 
-    char buffer[160];
+    char f_h[20], f_dur[20], f_dup[20], f_jit[20], f_asy[20];
+    Fmt_Float(f_h,   sizeof(f_h),   ai->health_score, 3U);
+    Fmt_Float(f_dur, sizeof(f_dur), att->ai_du[0], 4U);
+    Fmt_Float(f_dup, sizeof(f_dup), att->ai_du[1], 4U);
+    Fmt_Float(f_jit, sizeof(f_jit), ai->feat_gyro_jitter, 3U);
+    Fmt_Float(f_asy, sizeof(f_asy), ai->feat_motor_asym, 1U);
+
+    char buffer[200];
     /* Format: $AI,health,fault_cls,du_r,du_p,gyro_jitter,motor_asym,ai_on\r\n */
     int len = snprintf(buffer, sizeof(buffer),
-        "$AI,%.3f,%u,%.4f,%.4f,%.3f,%.1f,%u\r\n",
-        ai->health_score,
-        (unsigned int)ai->fault_class,
-        att->ai_du[0],
-        att->ai_du[1],
-        ai->feat_gyro_jitter,
-        ai->feat_motor_asym,
+        "$AI,%s,%u,%s,%s,%s,%s,%u\r\n",
+        f_h, (unsigned int)ai->fault_class, f_dur, f_dup, f_jit, f_asy,
         Flight_Controller_Get_AI_Enabled() ? 1U : 0U
+    );
+
+    if (len > 0) {
+        UART6_SendString(buffer);
+    }
+}
+
+void Telemetry_Send_Nav_Frame(const RTH_Output_t *rth, const Safety_Status_t *safety, float est_alt_m, uint8_t gps_sats) {
+    if (!rth || !safety) return;
+
+    char f_alt[20], f_dist[20];
+    Fmt_Float(f_alt,  sizeof(f_alt),  est_alt_m, 2U);
+    Fmt_Float(f_dist, sizeof(f_dist), rth->dist_to_home_m, 1U);
+
+    char buffer[160];
+    /* Format: $NAV,alt_m,dist_home_m,rth_state,safety_flags,gps_sats\r\n */
+    int len = snprintf(buffer, sizeof(buffer),
+        "$NAV,%s,%s,%u,%u,%u\r\n",
+        f_alt, f_dist,
+        (unsigned int)rth->state,
+        (unsigned int)safety->flags,
+        (unsigned int)gps_sats
     );
 
     if (len > 0) {
@@ -64,13 +141,26 @@ void Telemetry_Send_PID_Gains(void) {
     PID_Gains_t g;
     Flight_Controller_Get_Gains(&g);
 
-    char buffer[160];
+    char f[13][20];
+    Fmt_Float(f[0],  sizeof(f[0]),  g.Kp_angle, 3U);
+    Fmt_Float(f[1],  sizeof(f[1]),  g.Kp_p, 4U);
+    Fmt_Float(f[2],  sizeof(f[2]),  g.Ki_p, 4U);
+    Fmt_Float(f[3],  sizeof(f[3]),  g.Kd_p, 5U);
+    Fmt_Float(f[4],  sizeof(f[4]),  g.Kf_p, 4U);
+    Fmt_Float(f[5],  sizeof(f[5]),  g.Kp_q, 4U);
+    Fmt_Float(f[6],  sizeof(f[6]),  g.Ki_q, 4U);
+    Fmt_Float(f[7],  sizeof(f[7]),  g.Kd_q, 5U);
+    Fmt_Float(f[8],  sizeof(f[8]),  g.Kf_q, 4U);
+    Fmt_Float(f[9],  sizeof(f[9]),  g.Kp_r, 4U);
+    Fmt_Float(f[10], sizeof(f[10]), g.Ki_r, 4U);
+    Fmt_Float(f[11], sizeof(f[11]), g.Kd_r, 5U);
+    Fmt_Float(f[12], sizeof(f[12]), g.Kf_r, 4U);
+
+    char buffer[320];
     int len = snprintf(buffer, sizeof(buffer),
-        "$PID,%.3f,%.4f,%.4f,%.5f,%.4f,%.4f,%.4f,%.5f,%.4f,%.4f,%.4f,%.5f,%.4f\r\n",
-        g.Kp_angle,
-        g.Kp_p, g.Ki_p, g.Kd_p, g.Kf_p,
-        g.Kp_q, g.Ki_q, g.Kd_q, g.Kf_q,
-        g.Kp_r, g.Ki_r, g.Kd_r, g.Kf_r
+        "$PID,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\r\n",
+        f[0], f[1], f[2], f[3], f[4], f[5], f[6],
+        f[7], f[8], f[9], f[10], f[11], f[12]
     );
 
     if (len > 0) {
